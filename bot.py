@@ -339,18 +339,34 @@ def get_main_keyboard(user_id):
 
 # Обработчики команд
 @dp.message_handler(commands=["start"])
-async def start_command(message: types.Message):
+async def start_command(message: types.Message, state: FSMContext):
+    # Полностью сбрасываем все состояния
+    await state.finish()
+    
     user_id = message.from_user.id
     username = message.from_user.username or "unknown"
     full_name = message.from_user.full_name
     
     add_user(user_id, username, full_name)
     
+    # Удаляем предыдущие сообщения с клавиатурами если они были
+    try:
+        await message.delete()
+    except:
+        pass
+    
     await message.answer(
-        "👋 Добро пожаловать в бот!\n\n"
+        "🔄 Бот перезапущен!\n\n"
+        "👋 Добро пожаловать!\n"
         "Выберите действие в меню:",
         reply_markup=get_main_keyboard(user_id)
     )
+
+# Обработчик для отлова всех состояний и возврата в меню
+@dp.message_handler(state='*', commands=["start"])
+async def start_state_handler(message: types.Message, state: FSMContext):
+    await state.finish()
+    await start_command(message, state)
 
 @dp.message_handler(lambda message: message.text == "📝 Добавить клиента")
 async def add_tag_start(message: types.Message):
@@ -660,6 +676,18 @@ async def team_stats(message: types.Message):
     text += f"📉 Всего отписавшихся: {stats['total_unsubscribed']}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
+
+# Обработчик для отлова всех остальных состояний и возврата в меню
+@dp.message_handler(state='*')
+async def handle_all_states(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.finish()
+        user_id = message.from_user.id
+        await message.answer(
+            "🔄 Действие отменено. Возврат в главное меню.",
+            reply_markup=get_main_keyboard(user_id)
+        )
 
 if __name__ == "__main__":
     init_db()
