@@ -10,7 +10,6 @@ from aiogram.utils import executor
 import sqlite3
 import math
 import pytz
-import re
 
 # Конфигурация
 TOKEN = "8623083352:AAHPhZkAFymFxs272OO_YYECCeXQUXfH8is"
@@ -39,6 +38,13 @@ class MarkUnsubscribed(StatesGroup):
 
 class ClientListState(StatesGroup):
     viewing = State()
+
+class CheckTagState(StatesGroup):
+    waiting_for_tag = State()
+
+class PayoffState(StatesGroup):
+    waiting_for_worker_tag = State()
+    waiting_for_confirmation = State()
 
 # Инициализация БД
 def init_db():
@@ -87,6 +93,16 @@ def init_db():
     )
     ''')
     
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS payoffs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        amount REAL,
+        payoff_date TEXT,
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
     cursor.execute("INSERT OR IGNORE INTO users (user_id, username, is_admin) VALUES (?, ?, ?)", 
                   (ADMIN_ID, "admin", 1))
     
@@ -98,6 +114,14 @@ def get_user(user_id):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
+
+def get_user_by_username(username):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE username LIKE ?", (f"%{username}%",))
     user = cursor.fetchone()
     conn.close()
     return user
@@ -122,6 +146,21 @@ def get_tag_by_name(tag_name):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM tags WHERE tag = ? AND is_active = 1", (tag_name,))
+    tag = cursor.fetchone()
+    conn.close()
+    return tag
+
+def get_tag_info(tag_name):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.tag, t.deadline, u.username, u.user_id,
+           CASE WHEN u2.tag_id IS NOT NULL THEN 1 ELSE 0 END as is_unsubscribed
+    FROM tags t 
+    JOIN users u ON t.user_id = u.user_id 
+    LEFT JOIN unsubscribed u2 ON t.id = u2.tag_id
+    WHERE t.tag = ? AND t.is_active = 1
+    ''', (tag_name,))
     tag = cursor.fetchone()
     conn.close()
     return tag
@@ -199,7 +238,8 @@ def get_user_stats(user_id):
         'total_profit_rub': 0,
         'clients_count': len(tags),
         'unsubscribed_count': 0,
-        'refund_amount': 0
+        'refund_amount': 0,
+        'total_payoffs': 0
     }
     
     if tag_ids:
@@ -226,8 +266,38 @@ def get_user_stats(user_id):
         
         stats['refund_amount'] = stats['unsubscribed_count'] * 0.5
     
+    cursor.execute("SELECT SUM(amount) FROM payoffs WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()[0]
+    stats['total_payoffs'] = result if result else 0
+    
     conn.close()
     return stats
+
+def get_worker_unsubscribed_amount(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM tags WHERE user_id = ? AND is_active = 1", (user_id,))
+    tags = cursor.fetchall()
+    tag_ids = [tag[0] for tag in tags]
+    
+    amount = 0
+    if tag_ids:
+        placeholders = ','.join('?' * len(tag_ids))
+        cursor.execute(f"SELECT COUNT(*) FROM unsubscribed WHERE tag_id IN ({placeholders})", tag_ids)
+        count = cursor.fetchone()[0]
+        amount = count * 0.5
+    
+    conn.close()
+    return amount
+
+def add_payoff(user_id, amount):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO payoffs (user_id, amount, payoff_date) VALUES (?, ?, ?)", 
+                  (user_id, amount, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
 
 def get_team_stats():
     conn = sqlite3.connect('bot_database.db')
@@ -304,15 +374,14 @@ def get_pagination_keyboard(current_page, total_pages):
     keyboard.row(InlineKeyboardButton("❌ Закрыть", callback_data="close"))
     return keyboard
 
-# Улучшенное меню
+# Меню с кнопкой "Назад"
 def get_main_keyboard(user_id):
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
     user = get_user(user_id)
     is_admin = user[3] if user else 0
     
-    buttons_row1 = [KeyboardButton("📝 Добавить мамонта")]
-    
     if is_admin:
+        buttons_row1 = [KeyboardButton("📝 Добавить мамонта")]
         buttons_row2 = [
             KeyboardButton("💰 Добавить профит"),
             KeyboardButton("📌 Отметить отписку")
@@ -321,20 +390,37 @@ def get_main_keyboard(user_id):
             KeyboardButton("📊 Статистика команды"),
             KeyboardButton("👥 Мои мамонты")
         ]
-    else:
-        buttons_row2 = [KeyboardButton("👥 Мои мамонты")]
-        buttons_row3 = []
-    
-    buttons_row4 = [KeyboardButton("📈 Личная статистика")]
-    
-    keyboard.row(*buttons_row1)
-    if buttons_row2:
+        buttons_row4 = [
+            KeyboardButton("🔍 Проверить тег"),
+            KeyboardButton("💸 Списать переведенных")
+        ]
+        buttons_row5 = [KeyboardButton("📈 Личная статистика")]
+        
+        keyboard.row(*buttons_row1)
         keyboard.row(*buttons_row2)
-    if buttons_row3:
         keyboard.row(*buttons_row3)
-    keyboard.row(*buttons_row4)
+        keyboard.row(*buttons_row4)
+        keyboard.row(*buttons_row5)
+    else:
+        buttons_row1 = [KeyboardButton("📝 Добавить мамонта")]
+        buttons_row2 = [KeyboardButton("👥 Мои мамонты")]
+        buttons_row3 = [KeyboardButton("📈 Личная статистика")]
+        
+        keyboard.row(*buttons_row1)
+        keyboard.row(*buttons_row2)
+        keyboard.row(*buttons_row3)
     
     return keyboard
+
+# Обработчик кнопки "Назад" (возврат в меню)
+@dp.message_handler(lambda message: message.text == "◀️ Назад" or message.text == "Назад")
+async def back_to_menu(message: types.Message, state: FSMContext):
+    await state.finish()
+    user_id = message.from_user.id
+    await message.answer(
+        "📋 Главное меню:",
+        reply_markup=get_main_keyboard(user_id)
+    )
 
 # Обработчики команд
 @dp.message_handler(commands=["start"])
@@ -349,7 +435,7 @@ async def start_command(message: types.Message, state: FSMContext):
     
     await message.answer(
         "🔄 Бот перезапущен!\n\n"
-        "👋 Добро пожаловать!\n"
+        "👋 Добро пожаловать в игру Мамонты!\n"
         "Выберите действие в меню:",
         reply_markup=get_main_keyboard(user_id)
     )
@@ -363,17 +449,19 @@ async def start_state_handler(message: types.Message, state: FSMContext):
 async def add_tag_start(message: types.Message):
     await AddTagStates.waiting_for_tag_and_deadline.set()
     await message.answer(
-        "Введите тег и срок одним сообщением:\n"
+        "Введите тег мамонта и срок одним сообщением:\n"
         "Формат: @user ДД.ММ\n"
         "Пример: @username 31.12",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("◀️ Назад"))
     )
 
 @dp.message_handler(state=AddTagStates.waiting_for_tag_and_deadline)
 async def process_tag_and_deadline(message: types.Message, state: FSMContext):
-    text = message.text.strip()
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
     
-    # Разбиваем на части
+    text = message.text.strip()
     parts = text.split()
     
     if len(parts) < 2:
@@ -384,7 +472,6 @@ async def process_tag_and_deadline(message: types.Message, state: FSMContext):
         )
         return
     
-    # Проверяем, что тег начинается с @
     tag = parts[0]
     if not tag.startswith('@'):
         await message.answer(
@@ -394,10 +481,8 @@ async def process_tag_and_deadline(message: types.Message, state: FSMContext):
         )
         return
     
-    # Собираем дату (может быть несколько частей, если дата с пробелами)
     deadline = ' '.join(parts[1:])
     
-    # Проверяем формат даты
     try:
         datetime.strptime(deadline, "%d.%m")
     except ValueError:
@@ -408,13 +493,11 @@ async def process_tag_and_deadline(message: types.Message, state: FSMContext):
         )
         return
     
-    # Проверяем, существует ли уже такой тег
     existing_tag = get_tag_by_name(tag)
     if existing_tag:
         await message.answer("❌ Такой тег уже существует! Введите другой тег:")
         return
     
-    # Сохраняем в базу
     user_id = message.from_user.id
     add_tag(user_id, tag, deadline)
     
@@ -437,11 +520,15 @@ async def admin_add_profit_start(message: types.Message):
     await AdminAddProfit.waiting_for_tag.set()
     await message.answer(
         "Введите тег мамонта:",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("◀️ Назад"))
     )
 
 @dp.message_handler(state=AdminAddProfit.waiting_for_tag)
 async def admin_process_tag(message: types.Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
+    
     tag_name = message.text.strip()
     tag = get_tag_by_name(tag_name)
     
@@ -455,6 +542,10 @@ async def admin_process_tag(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=AdminAddProfit.waiting_for_usd)
 async def admin_process_usd(message: types.Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
+    
     try:
         amount_usd = float(message.text.replace(',', '.'))
         await state.update_data(amount_usd=amount_usd)
@@ -465,6 +556,10 @@ async def admin_process_usd(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=AdminAddProfit.waiting_for_rub)
 async def admin_process_rub(message: types.Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
+    
     try:
         amount_rub = float(message.text.replace(',', '.'))
         data = await state.get_data()
@@ -486,7 +581,7 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
             user_id,
             f"💰 Новый профит!\n\n"
             f"💵 Сумма: {amount_rub}₽\n"
-            f"💲 Ваша выплата: {profit_usd:.2f}$"
+            f"💲 Твоя выплата: {profit_usd:.2f}$"
         )
         
         await state.finish()
@@ -524,10 +619,14 @@ async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
     
     await state.update_data(tags_list=unsubscribed_tags)
     await MarkUnsubscribed.waiting_for_selection.set()
-    await message.answer(tags_list, reply_markup=types.ReplyKeyboardRemove())
+    await message.answer(tags_list, reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("◀️ Назад")))
 
 @dp.message_handler(state=MarkUnsubscribed.waiting_for_selection)
 async def process_unsubscribed_selection(message: types.Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
+    
     try:
         numbers = [int(x.strip()) for x in message.text.split(',')]
         data = await state.get_data()
@@ -553,7 +652,7 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
         )
         
     except ValueError:
-        await message.answer("❌ Введите номера через запятую (например: 1,2,3):")
+        await message.answer("❌ Введите номера через запятую (например: 1,2,3,4,5):")
 
 @dp.message_handler(lambda message: message.text == "👥 Мои мамонты")
 async def view_all_clients(message: types.Message, state: FSMContext):
@@ -641,7 +740,162 @@ async def refresh_callback(callback_query: types.CallbackQuery, state: FSMContex
 async def close_callback(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.delete()
     await state.finish()
+    user_id = callback_query.from_user.id
+    await bot.send_message(user_id, "📋 Главное меню:", reply_markup=get_main_keyboard(user_id))
     await callback_query.answer()
+
+@dp.message_handler(lambda message: message.text == "🔍 Проверить тег")
+async def check_tag_start(message: types.Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user[3]:
+        await message.answer("❌ У вас нет прав для этого действия!")
+        return
+    
+    await CheckTagState.waiting_for_tag.set()
+    await message.answer(
+        "Введите тег для проверки:",
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("◀️ Назад"))
+    )
+
+@dp.message_handler(state=CheckTagState.waiting_for_tag)
+async def check_tag_process(message: types.Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
+    
+    tag_name = message.text.strip()
+    tag_info = get_tag_info(tag_name)
+    
+    if not tag_info:
+        await message.answer("❌ Тег не найден в базе данных!")
+        await state.finish()
+        await message.answer("📋 Главное меню:", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    tag, deadline, username, user_id, is_unsubscribed = tag_info
+    status = "✅ Отписался" if is_unsubscribed else "❌ Не отписался"
+    
+    await state.finish()
+    await message.answer(
+        f"🔍 Информация о теге:\n\n"
+        f"📌 Тег: {tag}\n"
+        f"📅 Срок: {deadline}\n"
+        f"👤 Воркер: @{username}\n"
+        f"📊 Статус: {status}",
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+@dp.message_handler(lambda message: message.text == "💸 Списать переведенных")
+async def payoff_start(message: types.Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user[3]:
+        await message.answer("❌ У вас нет прав для этого действия!")
+        return
+    
+    await PayoffState.waiting_for_worker_tag.set()
+    await message.answer(
+        "Введите тег воркера (например: @username):",
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("◀️ Назад"))
+    )
+
+@dp.message_handler(state=PayoffState.waiting_for_worker_tag)
+async def payoff_process_worker(message: types.Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_to_menu(message, state)
+        return
+    
+    worker_tag = message.text.strip()
+    
+    if not worker_tag.startswith('@'):
+        worker_tag = '@' + worker_tag
+    
+    # Ищем воркера
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username FROM users WHERE username LIKE ?", (f"%{worker_tag[1:]}%",))
+    worker = cursor.fetchone()
+    conn.close()
+    
+    if not worker:
+        await message.answer("❌ Воркер не найден! Проверьте тег.")
+        return
+    
+    worker_id, worker_username = worker
+    
+    # Считаем сумму за отписавшихся
+    amount = get_worker_unsubscribed_amount(worker_id)
+    
+    if amount == 0:
+        await message.answer(
+            f"📊 У воркера @{worker_username} нет отписавшихся мамонтов.\n"
+            f"Сумма к списанию: 0$"
+        )
+        await state.finish()
+        await message.answer("📋 Главное меню:", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+    
+    await state.update_data(worker_id=worker_id, worker_username=worker_username, amount=amount)
+    await PayoffState.waiting_for_confirmation.set()
+    
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("✅ Выплатил", callback_data="confirm_payoff"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel_payoff")
+    )
+    
+    await message.answer(
+        f"📊 Информация о списании:\n\n"
+        f"👤 Воркер: @{worker_username}\n"
+        f"🦣 Отписавшихся мамонтов: {int(amount/0.5)}\n"
+        f"💲 Сумма к списанию: {amount:.2f}$\n\n"
+        f"Подтвердите списание:",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "confirm_payoff", state=PayoffState.waiting_for_confirmation)
+async def confirm_payoff(callback_query: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    worker_id = data.get('worker_id')
+    worker_username = data.get('worker_username')
+    amount = data.get('amount')
+    
+    if not worker_id or not amount:
+        await callback_query.message.edit_text("❌ Ошибка! Попробуйте заново.")
+        await state.finish()
+        await callback_query.answer()
+        return
+    
+    # Сохраняем списание
+    add_payoff(worker_id, amount)
+    
+    await state.finish()
+    await callback_query.message.edit_text(
+        f"✅ Списание выполнено!\n\n"
+        f"👤 Воркер: @{worker_username}\n"
+        f"💲 Сумма: {amount:.2f}$\n"
+        f"📅 Дата: {datetime.now(TIMEZONE).strftime('%d.%m.%Y %H:%M')}"
+    )
+    
+    # Отправляем уведомление воркеру
+    await bot.send_message(
+        worker_id,
+        f"📢 Вам начислена выплата за переведенных мамонтов!\n\n"
+        f"💰 Сумма: {amount:.2f}$"
+    )
+    
+    await callback_query.answer("✅ Списание подтверждено!")
+    await bot.send_message(callback_query.from_user.id, "📋 Главное меню:", reply_markup=get_main_keyboard(callback_query.from_user.id))
+
+@dp.callback_query_handler(lambda c: c.data == "cancel_payoff", state=PayoffState.waiting_for_confirmation)
+async def cancel_payoff(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.finish()
+    await callback_query.message.edit_text("❌ Списание отменено.")
+    await callback_query.answer()
+    await bot.send_message(callback_query.from_user.id, "📋 Главное меню:", reply_markup=get_main_keyboard(callback_query.from_user.id))
 
 @dp.message_handler(lambda message: message.text == "📈 Личная статистика")
 async def personal_stats(message: types.Message):
@@ -651,9 +905,10 @@ async def personal_stats(message: types.Message):
     text = f"📊 Ваша личная статистика:\n\n"
     text += f"💰 Общая сумма выплат: ${stats['total_payments_usd']:.2f}\n"
     text += f"💵 Сумма профитов: ${stats['total_profit_usd']:.2f}\n"
-    text += f"👥 Количество мамонтов: {stats['clients_count']}\n"
+    text += f"🦣 Количество мамонтов: {stats['clients_count']}\n"
     text += f"📉 Количество отписавшихся: {stats['unsubscribed_count']}\n"
-    text += f"💲 Оплата за переведнных: ${stats['refund_amount']:.2f}"
+    text += f"💲 Компенсация за отписавшихся: ${stats['refund_amount']:.2f}\n"
+    text += f"💸 Всего списано: ${stats['total_payoffs']:.2f}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
@@ -672,7 +927,7 @@ async def team_stats(message: types.Message):
     text += f"👥 Активных воркеров: {stats['active_workers']}\n"
     text += f"💰 Общая сумма оплат: ${stats['total_payments_usd']:.2f}\n"
     text += f"💵 Общая сумма профитов: ${stats['total_profit_usd']:.2f}\n"
-    text += f"👤 Всего мамонтов: {stats['total_clients']}\n"
+    text += f"🦣 Всего мамонтов: {stats['total_clients']}\n"
     text += f"📉 Всего отписавшихся: {stats['total_unsubscribed']}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
