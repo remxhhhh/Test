@@ -310,7 +310,7 @@ def get_main_keyboard(user_id):
     user = get_user(user_id)
     is_admin = user[3] if user else 0
     
-    buttons_row1 = [KeyboardButton("📝 Добавить клиента")]
+    buttons_row1 = [KeyboardButton("📝 Добавить мамонта")]
     
     if is_admin:
         buttons_row2 = [
@@ -319,10 +319,10 @@ def get_main_keyboard(user_id):
         ]
         buttons_row3 = [
             KeyboardButton("📊 Статистика команды"),
-            KeyboardButton("👥 Мои клиенты")
+            KeyboardButton("👥 Мои мамонты")
         ]
     else:
-        buttons_row2 = [KeyboardButton("👥 Мои клиенты")]
+        buttons_row2 = [KeyboardButton("👥 Мои мамонты")]
         buttons_row3 = []
     
     buttons_row4 = [KeyboardButton("📈 Личная статистика")]
@@ -359,7 +359,7 @@ async def start_state_handler(message: types.Message, state: FSMContext):
     await state.finish()
     await start_command(message, state)
 
-@dp.message_handler(lambda message: message.text == "📝 Добавить клиента")
+@dp.message_handler(lambda message: message.text == "📝 Добавить мамонта")
 async def add_tag_start(message: types.Message):
     await AddTagStates.waiting_for_tag_and_deadline.set()
     await message.answer(
@@ -420,7 +420,7 @@ async def process_tag_and_deadline(message: types.Message, state: FSMContext):
     
     await state.finish()
     await message.answer(
-        f"✅ Клиент {tag} успешно добавлен!\n"
+        f"✅ Мамонт {tag} успешно добавлен!\n"
         f"📅 Срок: {deadline}",
         reply_markup=get_main_keyboard(user_id)
     )
@@ -436,7 +436,7 @@ async def admin_add_profit_start(message: types.Message):
     
     await AdminAddProfit.waiting_for_tag.set()
     await message.answer(
-        "Введите тег клиента:",
+        "Введите тег мамонта:",
         reply_markup=types.ReplyKeyboardRemove()
     )
 
@@ -516,7 +516,7 @@ async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
         await message.answer("✅ Нет активных тегов для отметки!")
         return
     
-    tags_list = "📋 Список клиентов для отметки отписки:\n\n"
+    tags_list = "📋 Список мамонтов для отметки отписки:\n\n"
     for i, tag in enumerate(unsubscribed_tags, 1):
         tags_list += f"{i}. {tag[1]} (@{tag[2]})\n"
     
@@ -548,20 +548,20 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
         
         await state.finish()
         await message.answer(
-            f"✅ Отмечено {marked_count} клиентов как отписавшиеся!",
+            f"✅ Отмечено {marked_count} мамонтов как отписавшиеся!",
             reply_markup=get_main_keyboard(ADMIN_ID)
         )
         
     except ValueError:
-        await message.answer("❌ Введите номера через запятую (например: 1,2,3,4,5):")
+        await message.answer("❌ Введите номера через запятую (например: 1,2,3):")
 
-@dp.message_handler(lambda message: message.text == "👥 Мои клиенты")
+@dp.message_handler(lambda message: message.text == "👥 Мои мамонты")
 async def view_all_clients(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     tags = get_all_user_tags_with_status(user_id)
     
     if not tags:
-        await message.answer("У вас нет клиентов.")
+        await message.answer("У вас нет мамонтов.")
         return
     
     await state.update_data(clients_list=tags)
@@ -574,7 +574,7 @@ async def view_all_clients(message: types.Message, state: FSMContext):
 async def send_clients_page(message_or_callback, user_id, tags, page, update_time):
     items, page, total_pages = paginate_items(tags, page)
     
-    text = f"📋 Список клиентов\n"
+    text = f"📋 Список мамонтов\n"
     text += f"🕐 Последнее обновление: {update_time} UTC+3\n\n"
     
     for item in items:
@@ -610,7 +610,7 @@ async def pagination_callback(callback_query: types.CallbackQuery, state: FSMCon
     tags = data.get('clients_list', [])
     
     if not tags:
-        await callback_query.message.edit_text("❌ Список клиентов не найден. Нажмите 'Мои клиенты' заново.")
+        await callback_query.message.edit_text("❌ Список мамонтов не найден. Нажмите 'Мои мамонты' заново.")
         await callback_query.answer()
         await state.finish()
         return
@@ -625,7 +625,7 @@ async def refresh_callback(callback_query: types.CallbackQuery, state: FSMContex
     tags = get_all_user_tags_with_status(user_id)
     
     if not tags:
-        await callback_query.message.edit_text("У вас нет клиентов.")
+        await callback_query.message.edit_text("У вас нет мамонтов.")
         await callback_query.answer()
         await state.finish()
         return
@@ -651,9 +651,9 @@ async def personal_stats(message: types.Message):
     text = f"📊 Ваша личная статистика:\n\n"
     text += f"💰 Общая сумма выплат: ${stats['total_payments_usd']:.2f}\n"
     text += f"💵 Сумма профитов: ${stats['total_profit_usd']:.2f}\n"
-    text += f"👥 Количество клиентов: {stats['clients_count']}\n"
+    text += f"👥 Количество мамонтов: {stats['clients_count']}\n"
     text += f"📉 Количество отписавшихся: {stats['unsubscribed_count']}\n"
-    text += f"💲 Компенсация за отписавшихся: ${stats['refund_amount']:.2f}"
+    text += f"💲 Оплата за переведнных: ${stats['refund_amount']:.2f}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
@@ -669,10 +669,10 @@ async def team_stats(message: types.Message):
     stats = get_team_stats()
     
     text = f"📊 Статистика команды:\n\n"
-    text += f"👥 Активных работников: {stats['active_workers']}\n"
+    text += f"👥 Активных воркеров: {stats['active_workers']}\n"
     text += f"💰 Общая сумма оплат: ${stats['total_payments_usd']:.2f}\n"
     text += f"💵 Общая сумма профитов: ${stats['total_profit_usd']:.2f}\n"
-    text += f"👤 Всего клиентов: {stats['total_clients']}\n"
+    text += f"👤 Всего мамонтов: {stats['total_clients']}\n"
     text += f"📉 Всего отписавшихся: {stats['total_unsubscribed']}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
