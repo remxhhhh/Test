@@ -1,12 +1,12 @@
 import asyncio
 import logging
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
 import sqlite3
 
 # Конфигурация
@@ -17,9 +17,9 @@ ADMIN_ID = 2010296191
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация бота
-bot = Bot(token=TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot, storage=storage)
 
 # Состояния для FSM
 class AddTagStates(StatesGroup):
@@ -267,21 +267,21 @@ def get_main_keyboard(user_id):
     user = get_user(user_id)
     is_admin = user[3] if user else 0
     
-    buttons = [KeyboardButton(text="➕ Добавить тег")]
+    buttons = [KeyboardButton("➕ Добавить тег")]
     
     if is_admin:
-        buttons.append(KeyboardButton(text="💰 Добавить профит"))
-        buttons.append(KeyboardButton(text="📝 Пометить отписавших"))
-        buttons.append(KeyboardButton(text="📊 Статистика команды"))
+        buttons.append(KeyboardButton("💰 Добавить профит"))
+        buttons.append(KeyboardButton("📝 Пометить отписавших"))
+        buttons.append(KeyboardButton("📊 Статистика команды"))
     
-    buttons.append(KeyboardButton(text="👥 Клиенты"))
-    buttons.append(KeyboardButton(text="📈 Личная статистика"))
+    buttons.append(KeyboardButton("👥 Клиенты"))
+    buttons.append(KeyboardButton("📈 Личная статистика"))
     
     keyboard.add(*buttons)
     return keyboard
 
 # Обработчики команд
-@dp.message(Command("start"))
+@dp.message_handler(commands=["start"])
 async def start_command(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username or "unknown"
@@ -295,15 +295,15 @@ async def start_command(message: types.Message):
         reply_markup=get_main_keyboard(user_id)
     )
 
-@dp.message(F.text == "➕ Добавить тег")
-async def add_tag_start(message: types.Message, state: FSMContext):
-    await state.set_state(AddTagStates.waiting_for_tag)
+@dp.message_handler(lambda message: message.text == "➕ Добавить тег")
+async def add_tag_start(message: types.Message):
+    await AddTagStates.waiting_for_tag.set()
     await message.answer(
         "Введите тег для клиента:",
         reply_markup=types.ReplyKeyboardRemove()
     )
 
-@dp.message(AddTagStates.waiting_for_tag)
+@dp.message_handler(state=AddTagStates.waiting_for_tag)
 async def process_tag(message: types.Message, state: FSMContext):
     tag = message.text.strip()
     
@@ -314,10 +314,10 @@ async def process_tag(message: types.Message, state: FSMContext):
         return
     
     await state.update_data(tag=tag)
-    await state.set_state(AddTagStates.waiting_for_deadline)
+    await AddTagStates.waiting_for_deadline.set()
     await message.answer("Введите срок (в формате ДД.ММ):")
 
-@dp.message(AddTagStates.waiting_for_deadline)
+@dp.message_handler(state=AddTagStates.waiting_for_deadline)
 async def process_deadline(message: types.Message, state: FSMContext):
     deadline = message.text.strip()
     
@@ -334,15 +334,15 @@ async def process_deadline(message: types.Message, state: FSMContext):
     
     add_tag(user_id, tag, deadline)
     
-    await state.clear()
+    await state.finish()
     await message.answer(
         f"✅ Тег '{tag}' успешно добавлен!\n"
         f"📅 Срок: {deadline}",
         reply_markup=get_main_keyboard(user_id)
     )
 
-@dp.message(F.text == "💰 Добавить профит")
-async def admin_add_profit_start(message: types.Message, state: FSMContext):
+@dp.message_handler(lambda message: message.text == "💰 Добавить профит")
+async def admin_add_profit_start(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
     
@@ -350,13 +350,13 @@ async def admin_add_profit_start(message: types.Message, state: FSMContext):
         await message.answer("❌ У вас нет прав для этого действия!")
         return
     
-    await state.set_state(AdminAddProfit.waiting_for_tag)
+    await AdminAddProfit.waiting_for_tag.set()
     await message.answer(
         "Введите тег клиента:",
         reply_markup=types.ReplyKeyboardRemove()
     )
 
-@dp.message(AdminAddProfit.waiting_for_tag)
+@dp.message_handler(state=AdminAddProfit.waiting_for_tag)
 async def admin_process_tag(message: types.Message, state: FSMContext):
     tag_name = message.text.strip()
     tag = get_tag_by_name(tag_name)
@@ -366,20 +366,20 @@ async def admin_process_tag(message: types.Message, state: FSMContext):
         return
     
     await state.update_data(tag_id=tag[0])
-    await state.set_state(AdminAddProfit.waiting_for_usd)
+    await AdminAddProfit.waiting_for_usd.set()
     await message.answer("Введите сумму в $:")
 
-@dp.message(AdminAddProfit.waiting_for_usd)
+@dp.message_handler(state=AdminAddProfit.waiting_for_usd)
 async def admin_process_usd(message: types.Message, state: FSMContext):
     try:
         amount_usd = float(message.text.replace(',', '.'))
         await state.update_data(amount_usd=amount_usd)
-        await state.set_state(AdminAddProfit.waiting_for_rub)
+        await AdminAddProfit.waiting_for_rub.set()
         await message.answer("Введите сумму в рублях:")
     except ValueError:
         await message.answer("❌ Введите корректное число:")
 
-@dp.message(AdminAddProfit.waiting_for_rub)
+@dp.message_handler(state=AdminAddProfit.waiting_for_rub)
 async def admin_process_rub(message: types.Message, state: FSMContext):
     try:
         amount_rub = float(message.text.replace(',', '.'))
@@ -408,7 +408,7 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
             f"Ваша выплата: {profit:.2f}₽"
         )
         
-        await state.clear()
+        await state.finish()
         await message.answer(
             f"✅ Профит успешно добавлен!\n"
             f"💵 Сумма: {amount_usd}$ = {amount_rub}₽\n"
@@ -419,7 +419,7 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное число:")
 
-@dp.message(F.text == "📝 Пометить отписавших")
+@dp.message_handler(lambda message: message.text == "📝 Пометить отписавших")
 async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user = get_user(user_id)
@@ -443,10 +443,10 @@ async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
     
     # Сохраняем список тегов в состояние
     await state.update_data(tags_list=unsubscribed_tags)
-    await state.set_state(MarkUnsubscribed.waiting_for_selection)
+    await MarkUnsubscribed.waiting_for_selection.set()
     await message.answer(tags_list, reply_markup=types.ReplyKeyboardRemove())
 
-@dp.message(MarkUnsubscribed.waiting_for_selection)
+@dp.message_handler(state=MarkUnsubscribed.waiting_for_selection)
 async def process_unsubscribed_selection(message: types.Message, state: FSMContext):
     try:
         # Парсим номера
@@ -469,7 +469,7 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
             add_unsubscribed(tag_id)
             marked_count += 1
         
-        await state.clear()
+        await state.finish()
         await message.answer(
             f"✅ Отмечено {marked_count} клиентов как отписавшиеся!",
             reply_markup=get_main_keyboard(ADMIN_ID)
@@ -478,34 +478,34 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
     except ValueError:
         await message.answer("❌ Введите номера через запятую (например: 1,2,3,4,5):")
 
-@dp.message(F.text == "👥 Клиенты")
+@dp.message_handler(lambda message: message.text == "👥 Клиенты")
 async def clients_menu(message: types.Message):
-    user_id = message.from_user.id
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Посмотреть не отписавших", callback_data="view_active")],
-        [InlineKeyboardButton(text="📋 Посмотреть отписавших", callback_data="view_unsubscribed")]
-    ])
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton(text="📋 Посмотреть не отписавших", callback_data="view_active"),
+        InlineKeyboardButton(text="📋 Посмотреть отписавших", callback_data="view_unsubscribed")
+    )
     await message.answer("Выберите действие:", reply_markup=keyboard)
 
-@dp.callback_query(F.data == "view_active")
-async def view_active_clients(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
+@dp.callback_query_handler(lambda c: c.data == "view_active")
+async def view_active_clients(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
     tags = get_user_tags(user_id)
     
     if not tags:
-        await callback.message.edit_text("У вас нет активных клиентов.")
+        await bot.send_message(callback_query.from_user.id, "У вас нет активных клиентов.")
         return
     
     text = "📋 Ваши активные клиенты:\n\n"
     for tag in tags:
         text += f"🔹 Тег: {tag[1]}\n📅 Срок: {tag[3]}\n\n"
     
-    await callback.message.edit_text(text)
-    await callback.answer()
+    await bot.send_message(callback_query.from_user.id, text)
+    await callback_query.answer()
 
-@dp.callback_query(F.data == "view_unsubscribed")
-async def view_unsubscribed_clients(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
+@dp.callback_query_handler(lambda c: c.data == "view_unsubscribed")
+async def view_unsubscribed_clients(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
     
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
@@ -519,17 +519,17 @@ async def view_unsubscribed_clients(callback: types.CallbackQuery):
     conn.close()
     
     if not tags:
-        await callback.message.edit_text("У вас нет отписавшихся клиентов.")
+        await bot.send_message(callback_query.from_user.id, "У вас нет отписавшихся клиентов.")
         return
     
     text = "📋 Ваши отписавшиеся клиенты:\n\n"
     for tag in tags:
         text += f"🔹 Тег: {tag[0]}\n📅 Срок: {tag[1]}\n📆 Отписался: {tag[2]}\n\n"
     
-    await callback.message.edit_text(text)
-    await callback.answer()
+    await bot.send_message(callback_query.from_user.id, text)
+    await callback_query.answer()
 
-@dp.message(F.text == "📈 Личная статистика")
+@dp.message_handler(lambda message: message.text == "📈 Личная статистика")
 async def personal_stats(message: types.Message):
     user_id = message.from_user.id
     stats = get_user_stats(user_id)
@@ -543,7 +543,7 @@ async def personal_stats(message: types.Message):
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
-@dp.message(F.text == "📊 Статистика команды")
+@dp.message_handler(lambda message: message.text == "📊 Статистика команды")
 async def team_stats(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
@@ -564,15 +564,12 @@ async def team_stats(message: types.Message):
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
 # Обработчик для возврата в главное меню
-@dp.message(F.text == "Назад")
+@dp.message_handler(lambda message: message.text == "Назад")
 async def back_to_menu(message: types.Message):
     user_id = message.from_user.id
     await message.answer("Главное меню:", reply_markup=get_main_keyboard(user_id))
 
-async def main():
+if __name__ == "__main__":
     init_db()
     print("Бот запущен!")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True)
