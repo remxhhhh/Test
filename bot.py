@@ -903,12 +903,11 @@ async def personal_stats(message: types.Message):
     stats = get_user_stats(user_id)
     
     text = f"📊 Ваша личная статистика:\n\n"
-    text += f"💰 Общая сумма выплат: ${stats['total_payments_usd']:.2f}\n"
     text += f"💵 Сумма профитов: ${stats['total_profit_usd']:.2f}\n"
     text += f"🦣 Количество мамонтов: {stats['clients_count']}\n"
-    text += f"📉 Количество отписавшихся: {stats['unsubscribed_count']}\n"
-    text += f"💲 Компенсация за отписавшихся: ${stats['refund_amount']:.2f}\n"
-    text += f"💸 Всего списано: ${stats['total_payoffs']:.2f}"
+    text += f"📝 Количество переведенных: {stats['unsubscribed_count']}\n"
+    text += f"🗂️ Оплата за переведенных: ${stats['refund_amount']:.2f}\n"
+    text += f"💸 Заработок с переведенных: ${stats['total_payoffs']:.2f}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
