@@ -1,433 +1,578 @@
 import asyncio
-import aiosqlite
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import CommandStart
+import logging
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+import sqlite3
 
+# Конфигурация
 TOKEN = "8623083352:AAHPhZkAFymFxs272OO_YYECCeXQUXfH8is"
-ADMIN_IDS = {2010296191}  # сюда Telegram ID админа
-DB = "bot.db"
+ADMIN_ID = 2010296191
 
-bot = Bot(TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
+# Инициализация бота
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-class AddTag(StatesGroup):
-    tag = State()
-    term = State()
+# Состояния для FSM
+class AddTagStates(StatesGroup):
+    waiting_for_tag = State()
+    waiting_for_deadline = State()
 
+class AdminAddProfit(StatesGroup):
+    waiting_for_tag = State()
+    waiting_for_usd = State()
+    waiting_for_rub = State()
 
-class AddProfit(StatesGroup):
-    tag = State()
-    usd = State()
-    rub = State()
+class MarkUnsubscribed(StatesGroup):
+    waiting_for_selection = State()
 
-
-class MarkUnsub(StatesGroup):
-    numbers = State()
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
-def payout_percent(rub: float) -> float:
-    if rub <= 1000:
-        return 0.80
-    if rub <= 5000:
-        return 0.70
-    if rub <= 10000:
-        return 0.60
-    return 0.50
-
-
-async def init_db():
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            tag TEXT UNIQUE NOT NULL,
-            term TEXT NOT NULL,
-            is_unsub INTEGER DEFAULT 0
-        )
-        """)
-
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS profits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            tag TEXT NOT NULL,
-            usd REAL NOT NULL,
-            rub REAL NOT NULL,
-            payout REAL NOT NULL
-        )
-        """)
-        await db.commit()
-
-
-def main_kb(user_id: int):
-    buttons = [
-        [KeyboardButton(text="➕ Вбить тег")],
-        [KeyboardButton(text="👥 Клиенты")],
-        [KeyboardButton(text="📊 Посмотреть личную статистику")]
-    ]
-
-    if is_admin(user_id):
-        buttons += [
-            [KeyboardButton(text="💰 Добавить профит")],
-            [KeyboardButton(text="🚫 Пометить отписавших")],
-            [KeyboardButton(text="📈 Статистика команды")]
-        ]
-
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
-
-def clients_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Посмотреть не отписавших")],
-            [KeyboardButton(text="🚫 Посмотреть отписавших")],
-            [KeyboardButton(text="⬅️ Назад")]
-        ],
-        resize_keyboard=True
+# Инициализация БД
+def init_db():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    # Таблица пользователей
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        full_name TEXT,
+        is_admin BOOLEAN DEFAULT 0
     )
+    ''')
+    
+    # Таблица тегов
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag TEXT UNIQUE,
+        user_id INTEGER,
+        deadline TEXT,
+        is_active BOOLEAN DEFAULT 1,
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
+    # Таблица платежей
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag_id INTEGER,
+        amount_usd REAL,
+        amount_rub REAL,
+        profit REAL,
+        payment_date TEXT,
+        FOREIGN KEY (tag_id) REFERENCES tags (id)
+    )
+    ''')
+    
+    # Таблица отписавшихся
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS unsubscribed (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag_id INTEGER,
+        unsubscribed_date TEXT,
+        FOREIGN KEY (tag_id) REFERENCES tags (id)
+    )
+    ''')
+    
+    # Добавляем админа если его нет
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, is_admin) VALUES (?, ?, ?)", 
+                  (ADMIN_ID, "admin", 1))
+    
+    conn.commit()
+    conn.close()
 
+# Вспомогательные функции
+def get_user(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
 
-@dp.message(CommandStart())
-async def start(message: Message):
+def add_user(user_id, username, full_name):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)", 
+                  (user_id, username, full_name))
+    conn.commit()
+    conn.close()
+
+def add_tag(user_id, tag, deadline):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO tags (user_id, tag, deadline) VALUES (?, ?, ?)", 
+                  (user_id, tag, deadline))
+    conn.commit()
+    conn.close()
+
+def get_tag_by_name(tag_name):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM tags WHERE tag = ? AND is_active = 1", (tag_name,))
+    tag = cursor.fetchone()
+    conn.close()
+    return tag
+
+def get_user_tags(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM tags WHERE user_id = ? AND is_active = 1", (user_id,))
+    tags = cursor.fetchall()
+    conn.close()
+    return tags
+
+def add_payment(tag_id, amount_usd, amount_rub, profit):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO payments (tag_id, amount_usd, amount_rub, profit, payment_date) VALUES (?, ?, ?, ?, ?)", 
+                  (tag_id, amount_usd, amount_rub, profit, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def add_unsubscribed(tag_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO unsubscribed (tag_id, unsubscribed_date) VALUES (?, ?)", 
+                  (tag_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def get_unsubscribed_tags():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.id, t.tag, u.username, u.user_id 
+    FROM tags t 
+    JOIN users u ON t.user_id = u.user_id 
+    WHERE t.is_active = 1 
+    AND t.id NOT IN (SELECT tag_id FROM unsubscribed)
+    ''')
+    tags = cursor.fetchall()
+    conn.close()
+    return tags
+
+def get_all_unsubscribed_tags():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.id, t.tag, u.username, u.user_id 
+    FROM tags t 
+    JOIN users u ON t.user_id = u.user_id 
+    WHERE t.id IN (SELECT tag_id FROM unsubscribed)
+    ''')
+    tags = cursor.fetchall()
+    conn.close()
+    return tags
+
+def calculate_profit(amount_rub):
+    if amount_rub <= 1000:
+        return amount_rub * 0.8
+    elif amount_rub <= 5000:
+        return amount_rub * 0.7
+    elif amount_rub <= 10000:
+        return amount_rub * 0.6
+    else:
+        return amount_rub * 0.5
+
+def get_user_stats(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    # Получаем теги пользователя
+    cursor.execute("SELECT id FROM tags WHERE user_id = ? AND is_active = 1", (user_id,))
+    tags = cursor.fetchall()
+    tag_ids = [tag[0] for tag in tags]
+    
+    stats = {
+        'total_payments': 0,
+        'total_profit': 0,
+        'clients_count': len(tags),
+        'unsubscribed_count': 0,
+        'refund_amount': 0
+    }
+    
+    if tag_ids:
+        # Сумма платежей
+        placeholders = ','.join('?' * len(tag_ids))
+        cursor.execute(f"SELECT SUM(amount_rub) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
+        result = cursor.fetchone()[0]
+        stats['total_payments'] = result if result else 0
+        
+        # Сумма профита
+        cursor.execute(f"SELECT SUM(profit) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
+        result = cursor.fetchone()[0]
+        stats['total_profit'] = result if result else 0
+        
+        # Количество отписавшихся
+        cursor.execute(f"SELECT COUNT(*) FROM unsubscribed WHERE tag_id IN ({placeholders})", tag_ids)
+        stats['unsubscribed_count'] = cursor.fetchone()[0]
+        
+        # Сумма за отписавшихся (0.5$ за каждого)
+        stats['refund_amount'] = stats['unsubscribed_count'] * 0.5
+    
+    conn.close()
+    return stats
+
+def get_team_stats():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    stats = {
+        'active_workers': 0,
+        'total_payments': 0,
+        'total_profit': 0,
+        'total_clients': 0,
+        'total_unsubscribed': 0
+    }
+    
+    # Активные работники (пользователи с активными тегами)
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM tags WHERE is_active = 1")
+    stats['active_workers'] = cursor.fetchone()[0]
+    
+    # Общая сумма оплат
+    cursor.execute("SELECT SUM(amount_rub) FROM payments")
+    result = cursor.fetchone()[0]
+    stats['total_payments'] = result if result else 0
+    
+    # Общая сумма профитов
+    cursor.execute("SELECT SUM(profit) FROM payments")
+    result = cursor.fetchone()[0]
+    stats['total_profit'] = result if result else 0
+    
+    # Общее количество клиентов
+    cursor.execute("SELECT COUNT(*) FROM tags WHERE is_active = 1")
+    stats['total_clients'] = cursor.fetchone()[0]
+    
+    # Общее количество отписавшихся
+    cursor.execute("SELECT COUNT(*) FROM unsubscribed")
+    stats['total_unsubscribed'] = cursor.fetchone()[0]
+    
+    conn.close()
+    return stats
+
+# Клавиатуры
+def get_main_keyboard(user_id):
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+    user = get_user(user_id)
+    is_admin = user[3] if user else 0
+    
+    buttons = [KeyboardButton(text="➕ Добавить тег")]
+    
+    if is_admin:
+        buttons.append(KeyboardButton(text="💰 Добавить профит"))
+        buttons.append(KeyboardButton(text="📝 Пометить отписавших"))
+        buttons.append(KeyboardButton(text="📊 Статистика команды"))
+    
+    buttons.append(KeyboardButton(text="👥 Клиенты"))
+    buttons.append(KeyboardButton(text="📈 Личная статистика"))
+    
+    keyboard.add(*buttons)
+    return keyboard
+
+# Обработчики команд
+@dp.message(Command("start"))
+async def start_command(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "unknown"
+    full_name = message.from_user.full_name
+    
+    add_user(user_id, username, full_name)
+    
     await message.answer(
-        "Бот запущен.",
-        reply_markup=main_kb(message.from_user.id)
+        "👋 Добро пожаловать в бот!\n\n"
+        "Выберите действие:",
+        reply_markup=get_main_keyboard(user_id)
     )
 
+@dp.message(F.text == "➕ Добавить тег")
+async def add_tag_start(message: types.Message, state: FSMContext):
+    await state.set_state(AddTagStates.waiting_for_tag)
+    await message.answer(
+        "Введите тег для клиента:",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
 
-@dp.message(F.text == "⬅️ Назад")
-async def back(message: Message):
-    await message.answer("Главное меню:", reply_markup=main_kb(message.from_user.id))
-
-
-@dp.message(F.text == "➕ Вбить тег")
-async def add_tag_start(message: Message, state: FSMContext):
-    await state.set_state(AddTag.tag)
-    await message.answer("Впишите тег:")
-
-
-@dp.message(AddTag.tag)
-async def add_tag_get_tag(message: Message, state: FSMContext):
+@dp.message(AddTagStates.waiting_for_tag)
+async def process_tag(message: types.Message, state: FSMContext):
     tag = message.text.strip()
-
-    if not tag:
-        await message.answer("Тег не может быть пустым.")
+    
+    # Проверяем, существует ли уже такой тег
+    existing_tag = get_tag_by_name(tag)
+    if existing_tag:
+        await message.answer("❌ Такой тег уже существует! Введите другой тег:")
         return
-
+    
     await state.update_data(tag=tag)
-    await state.set_state(AddTag.term)
-    await message.answer("Впишите срок в формате 01.01:")
+    await state.set_state(AddTagStates.waiting_for_deadline)
+    await message.answer("Введите срок (в формате ДД.ММ):")
 
-
-@dp.message(AddTag.term)
-async def add_tag_get_term(message: Message, state: FSMContext):
-    data = await state.get_data()
-    tag = data["tag"]
-    term = message.text.strip()
-
-    async with aiosqlite.connect(DB) as db:
-        try:
-            await db.execute(
-                "INSERT INTO clients (user_id, tag, term) VALUES (?, ?, ?)",
-                (message.from_user.id, tag, term)
-            )
-            await db.commit()
-            await message.answer(
-                f"Тег добавлен:\n\nТег: {tag}\nСрок: {term}",
-                reply_markup=main_kb(message.from_user.id)
-            )
-        except aiosqlite.IntegrityError:
-            await message.answer(
-                "Такой тег уже есть в базе.",
-                reply_markup=main_kb(message.from_user.id)
-            )
-
-    await state.clear()
-
-
-@dp.message(F.text == "👥 Клиенты")
-async def clients_menu(message: Message):
-    await message.answer("Выберите раздел:", reply_markup=clients_kb())
-
-
-async def show_clients(message: Message, unsub_status: int):
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute(
-            """
-            SELECT tag, term FROM clients
-            WHERE user_id = ? AND is_unsub = ?
-            ORDER BY id DESC
-            """,
-            (message.from_user.id, unsub_status)
-        )
-        rows = await cursor.fetchall()
-
-    if not rows:
-        await message.answer("Список пуст.")
+@dp.message(AddTagStates.waiting_for_deadline)
+async def process_deadline(message: types.Message, state: FSMContext):
+    deadline = message.text.strip()
+    
+    # Простая проверка формата
+    try:
+        datetime.strptime(deadline, "%d.%m")
+    except ValueError:
+        await message.answer("❌ Неверный формат! Используйте ДД.ММ (например, 31.12):")
         return
-
-    text = ""
-    for i, (tag, term) in enumerate(rows, 1):
-        text += f"{i}. {tag} — срок {term}\n"
-
-    await message.answer(text)
-
-
-@dp.message(F.text == "✅ Посмотреть не отписавших")
-async def active_clients(message: Message):
-    await show_clients(message, 0)
-
-
-@dp.message(F.text == "🚫 Посмотреть отписавших")
-async def unsub_clients(message: Message):
-    await show_clients(message, 1)
-
+    
+    data = await state.get_data()
+    tag = data['tag']
+    user_id = message.from_user.id
+    
+    add_tag(user_id, tag, deadline)
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Тег '{tag}' успешно добавлен!\n"
+        f"📅 Срок: {deadline}",
+        reply_markup=get_main_keyboard(user_id)
+    )
 
 @dp.message(F.text == "💰 Добавить профит")
-async def add_profit_start(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    await state.set_state(AddProfit.tag)
-    await message.answer("Введите тег:")
-
-
-@dp.message(AddProfit.tag)
-async def add_profit_tag(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    tag = message.text.strip()
-
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute(
-            "SELECT user_id FROM clients WHERE tag = ?",
-            (tag,)
-        )
-        row = await cursor.fetchone()
-
-    if not row:
-        await message.answer("Такого тега нет в базе.")
-        await state.clear()
-        return
-
-    await state.update_data(tag=tag, worker_id=row[0])
-    await state.set_state(AddProfit.usd)
-    await message.answer("Напишите сумму в $:")
-
-
-@dp.message(AddProfit.usd)
-async def add_profit_usd(message: Message, state: FSMContext):
-    try:
-        usd = float(message.text.replace(",", "."))
-    except ValueError:
-        await message.answer("Введите число.")
-        return
-
-    await state.update_data(usd=usd)
-    await state.set_state(AddProfit.rub)
-    await message.answer("Введите сумму в рублях:")
-
-
-@dp.message(AddProfit.rub)
-async def add_profit_rub(message: Message, state: FSMContext):
-    try:
-        rub = float(message.text.replace(",", "."))
-    except ValueError:
-        await message.answer("Введите число.")
-        return
-
-    data = await state.get_data()
-    tag = data["tag"]
-    worker_id = data["worker_id"]
-    usd = data["usd"]
-
-    payout = rub * payout_percent(rub)
-
-    async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            """
-            INSERT INTO profits (user_id, tag, usd, rub, payout)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (worker_id, tag, usd, rub, payout)
-        )
-        await db.commit()
-
-    await bot.send_message(
-        worker_id,
-        f"💰 Новый профит: {payout:.2f}₽\nТег: {tag}"
-    )
-
-    await message.answer(
-        f"Профит добавлен.\n\nСумма: {rub:.2f}₽\nВыплата: {payout:.2f}₽",
-        reply_markup=main_kb(message.from_user.id)
-    )
-    await state.clear()
-
-
-@dp.message(F.text == "🚫 Пометить отписавших")
-async def mark_unsub_start(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute(
-            """
-            SELECT id, tag FROM clients
-            WHERE is_unsub = 0
-            ORDER BY id ASC
-            """
-        )
-        rows = await cursor.fetchall()
-
-    if not rows:
-        await message.answer("Нет активных тегов.")
-        return
-
-    await state.update_data(rows=rows)
-
-    text = "Выберите номера отписавших в формате 1,2,3:\n\n"
-    for i, (_, tag) in enumerate(rows, 1):
-        text += f"{i}. {tag}\n"
-
-    await state.set_state(MarkUnsub.numbers)
-    await message.answer(text)
-
-
-@dp.message(MarkUnsub.numbers)
-async def mark_unsub_finish(message: Message, state: FSMContext):
-    data = await state.get_data()
-    rows = data["rows"]
-
-    try:
-        nums = [
-            int(x.strip())
-            for x in message.text.split(",")
-            if x.strip()
-        ]
-    except ValueError:
-        await message.answer("Введите номера в формате 1,2,3")
-        return
-
-    selected_ids = []
-
-    for num in nums:
-        if 1 <= num <= len(rows):
-            selected_ids.append(rows[num - 1][0])
-
-    if not selected_ids:
-        await message.answer("Не выбрано ни одного корректного номера.")
-        return
-
-    async with aiosqlite.connect(DB) as db:
-        for client_id in selected_ids:
-            await db.execute(
-                "UPDATE clients SET is_unsub = 1 WHERE id = ?",
-                (client_id,)
-            )
-        await db.commit()
-
-    await message.answer(
-        f"Отмечено отписавших: {len(selected_ids)}",
-        reply_markup=main_kb(message.from_user.id)
-    )
-    await state.clear()
-
-
-@dp.message(F.text == "📊 Посмотреть личную статистику")
-async def personal_stats(message: Message):
+async def admin_add_profit_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM clients WHERE user_id = ?",
-            (user_id,)
-        )
-        clients_count = (await cursor.fetchone())[0]
-
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM clients WHERE user_id = ? AND is_unsub = 1",
-            (user_id,)
-        )
-        unsub_count = (await cursor.fetchone())[0]
-
-        cursor = await db.execute(
-            "SELECT COALESCE(SUM(payout), 0) FROM profits WHERE user_id = ?",
-            (user_id,)
-        )
-        payout_sum = (await cursor.fetchone())[0]
-
-    transfer_payment = unsub_count * 0.5
-
-    text = (
-        "📊 Личная статистика\n\n"
-        f"Сумма выплат: {payout_sum:.2f}₽\n"
-        f"Количество клиентов: {clients_count}\n"
-        f"Количество отписавших: {unsub_count}\n"
-        f"Оплата за переведённых: {transfer_payment:.2f}$"
-    )
-
-    await message.answer(text)
-
-
-@dp.message(F.text == "📈 Статистика команды")
-async def team_stats(message: Message):
-    if not is_admin(message.from_user.id):
+    user = get_user(user_id)
+    
+    if not user or not user[3]:  # Проверка на админа
+        await message.answer("❌ У вас нет прав для этого действия!")
         return
-
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM clients"
-        )
-        workers_count = (await cursor.fetchone())[0]
-
-        cursor = await db.execute(
-            "SELECT COALESCE(SUM(rub), 0) FROM profits"
-        )
-        total_payments = (await cursor.fetchone())[0]
-
-        cursor = await db.execute(
-            "SELECT COALESCE(SUM(payout), 0) FROM profits"
-        )
-        total_profits = (await cursor.fetchone())[0]
-
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM clients"
-        )
-        clients_count = (await cursor.fetchone())[0]
-
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM clients WHERE is_unsub = 1"
-        )
-        unsub_count = (await cursor.fetchone())[0]
-
-    text = (
-        "📈 Статистика команды\n\n"
-        f"Активных работников: {workers_count}\n"
-        f"Сумма оплат без вычета %: {total_payments:.2f}₽\n"
-        f"Сумма профитов с вычетом %: {total_profits:.2f}₽\n"
-        f"Количество клиентов: {clients_count}\n"
-        f"Количество отписавших: {unsub_count}"
+    
+    await state.set_state(AdminAddProfit.waiting_for_tag)
+    await message.answer(
+        "Введите тег клиента:",
+        reply_markup=types.ReplyKeyboardRemove()
     )
 
-    await message.answer(text)
+@dp.message(AdminAddProfit.waiting_for_tag)
+async def admin_process_tag(message: types.Message, state: FSMContext):
+    tag_name = message.text.strip()
+    tag = get_tag_by_name(tag_name)
+    
+    if not tag:
+        await message.answer("❌ Тег не найден! Введите существующий тег:")
+        return
+    
+    await state.update_data(tag_id=tag[0])
+    await state.set_state(AdminAddProfit.waiting_for_usd)
+    await message.answer("Введите сумму в $:")
 
+@dp.message(AdminAddProfit.waiting_for_usd)
+async def admin_process_usd(message: types.Message, state: FSMContext):
+    try:
+        amount_usd = float(message.text.replace(',', '.'))
+        await state.update_data(amount_usd=amount_usd)
+        await state.set_state(AdminAddProfit.waiting_for_rub)
+        await message.answer("Введите сумму в рублях:")
+    except ValueError:
+        await message.answer("❌ Введите корректное число:")
+
+@dp.message(AdminAddProfit.waiting_for_rub)
+async def admin_process_rub(message: types.Message, state: FSMContext):
+    try:
+        amount_rub = float(message.text.replace(',', '.'))
+        data = await state.get_data()
+        tag_id = data['tag_id']
+        amount_usd = data['amount_usd']
+        
+        # Рассчитываем профит
+        profit = calculate_profit(amount_rub)
+        
+        # Сохраняем платеж
+        add_payment(tag_id, amount_usd, amount_rub, profit)
+        
+        # Получаем информацию о пользователе
+        conn = sqlite3.connect('bot_database.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM tags WHERE id = ?", (tag_id,))
+        user_id = cursor.fetchone()[0]
+        conn.close()
+        
+        # Отправляем уведомление пользователю
+        await bot.send_message(
+            user_id,
+            f"💰 Новый профит!\n"
+            f"Сумма: {amount_rub}₽\n"
+            f"Ваша выплата: {profit:.2f}₽"
+        )
+        
+        await state.clear()
+        await message.answer(
+            f"✅ Профит успешно добавлен!\n"
+            f"💵 Сумма: {amount_usd}$ = {amount_rub}₽\n"
+            f"📊 Выплата: {profit:.2f}₽",
+            reply_markup=get_main_keyboard(ADMIN_ID)
+        )
+        
+    except ValueError:
+        await message.answer("❌ Введите корректное число:")
+
+@dp.message(F.text == "📝 Пометить отписавших")
+async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user[3]:
+        await message.answer("❌ У вас нет прав для этого действия!")
+        return
+    
+    unsubscribed_tags = get_unsubscribed_tags()
+    
+    if not unsubscribed_tags:
+        await message.answer("✅ Нет активных тегов для отметки!")
+        return
+    
+    # Формируем список
+    tags_list = "📋 Список клиентов для отметки:\n\n"
+    for i, tag in enumerate(unsubscribed_tags, 1):
+        tags_list += f"{i}. Тег: {tag[1]} (Пользователь: @{tag[2]})\n"
+    
+    tags_list += "\nВведите номера через запятую (например: 1,2,3,4,5)"
+    
+    # Сохраняем список тегов в состояние
+    await state.update_data(tags_list=unsubscribed_tags)
+    await state.set_state(MarkUnsubscribed.waiting_for_selection)
+    await message.answer(tags_list, reply_markup=types.ReplyKeyboardRemove())
+
+@dp.message(MarkUnsubscribed.waiting_for_selection)
+async def process_unsubscribed_selection(message: types.Message, state: FSMContext):
+    try:
+        # Парсим номера
+        numbers = [int(x.strip()) for x in message.text.split(',')]
+        data = await state.get_data()
+        tags_list = data['tags_list']
+        
+        # Проверяем корректность номеров
+        max_index = len(tags_list)
+        invalid_numbers = [n for n in numbers if n < 1 or n > max_index]
+        
+        if invalid_numbers:
+            await message.answer(f"❌ Некорректные номера: {', '.join(map(str, invalid_numbers))}\nВведите номера от 1 до {max_index}:")
+            return
+        
+        # Отмечаем отписавшихся
+        marked_count = 0
+        for num in numbers:
+            tag_id = tags_list[num-1][0]
+            add_unsubscribed(tag_id)
+            marked_count += 1
+        
+        await state.clear()
+        await message.answer(
+            f"✅ Отмечено {marked_count} клиентов как отписавшиеся!",
+            reply_markup=get_main_keyboard(ADMIN_ID)
+        )
+        
+    except ValueError:
+        await message.answer("❌ Введите номера через запятую (например: 1,2,3,4,5):")
+
+@dp.message(F.text == "👥 Клиенты")
+async def clients_menu(message: types.Message):
+    user_id = message.from_user.id
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Посмотреть не отписавших", callback_data="view_active")],
+        [InlineKeyboardButton(text="📋 Посмотреть отписавших", callback_data="view_unsubscribed")]
+    ])
+    await message.answer("Выберите действие:", reply_markup=keyboard)
+
+@dp.callback_query(F.data == "view_active")
+async def view_active_clients(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    tags = get_user_tags(user_id)
+    
+    if not tags:
+        await callback.message.edit_text("У вас нет активных клиентов.")
+        return
+    
+    text = "📋 Ваши активные клиенты:\n\n"
+    for tag in tags:
+        text += f"🔹 Тег: {tag[1]}\n📅 Срок: {tag[3]}\n\n"
+    
+    await callback.message.edit_text(text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "view_unsubscribed")
+async def view_unsubscribed_clients(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.tag, t.deadline, u.unsubscribed_date 
+    FROM tags t 
+    JOIN unsubscribed u ON t.id = u.tag_id 
+    WHERE t.user_id = ?
+    ''', (user_id,))
+    tags = cursor.fetchall()
+    conn.close()
+    
+    if not tags:
+        await callback.message.edit_text("У вас нет отписавшихся клиентов.")
+        return
+    
+    text = "📋 Ваши отписавшиеся клиенты:\n\n"
+    for tag in tags:
+        text += f"🔹 Тег: {tag[0]}\n📅 Срок: {tag[1]}\n📆 Отписался: {tag[2]}\n\n"
+    
+    await callback.message.edit_text(text)
+    await callback.answer()
+
+@dp.message(F.text == "📈 Личная статистика")
+async def personal_stats(message: types.Message):
+    user_id = message.from_user.id
+    stats = get_user_stats(user_id)
+    
+    text = f"📊 Ваша личная статистика:\n\n"
+    text += f"💰 Общая сумма выплат: {stats['total_payments']:.2f}₽\n"
+    text += f"💵 Сумма профитов: {stats['total_profit']:.2f}₽\n"
+    text += f"👥 Количество клиентов: {stats['clients_count']}\n"
+    text += f"📉 Количество отписавшихся: {stats['unsubscribed_count']}\n"
+    text += f"💲 Компенсация за отписавшихся: {stats['refund_amount']:.2f}$"
+    
+    await message.answer(text, reply_markup=get_main_keyboard(user_id))
+
+@dp.message(F.text == "📊 Статистика команды")
+async def team_stats(message: types.Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    if not user or not user[3]:
+        await message.answer("❌ У вас нет прав для этого действия!")
+        return
+    
+    stats = get_team_stats()
+    
+    text = f"📊 Статистика команды:\n\n"
+    text += f"👥 Активных работников: {stats['active_workers']}\n"
+    text += f"💰 Общая сумма оплат: {stats['total_payments']:.2f}₽\n"
+    text += f"💵 Общая сумма профитов: {stats['total_profit']:.2f}₽\n"
+    text += f"👤 Всего клиентов: {stats['total_clients']}\n"
+    text += f"📉 Всего отписавшихся: {stats['total_unsubscribed']}"
+    
+    await message.answer(text, reply_markup=get_main_keyboard(user_id))
+
+# Обработчик для возврата в главное меню
+@dp.message(F.text == "Назад")
+async def back_to_menu(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer("Главное меню:", reply_markup=get_main_keyboard(user_id))
 
 async def main():
-    await init_db()
+    init_db()
+    print("Бот запущен!")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
