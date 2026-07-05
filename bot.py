@@ -37,7 +37,6 @@ class AdminAddProfit(StatesGroup):
 class MarkUnsubscribed(StatesGroup):
     waiting_for_selection = State()
 
-# Состояние для хранения списка клиентов
 class ClientListState(StatesGroup):
     viewing = State()
 
@@ -348,11 +347,6 @@ async def start_command(message: types.Message, state: FSMContext):
     
     add_user(user_id, username, full_name)
     
-    try:
-        await message.delete()
-    except:
-        pass
-    
     await message.answer(
         "🔄 Бот перезапущен!\n\n"
         "👋 Добро пожаловать!\n"
@@ -369,13 +363,18 @@ async def start_state_handler(message: types.Message, state: FSMContext):
 async def add_tag_start(message: types.Message):
     await AddTagStates.waiting_for_tag.set()
     await message.answer(
-        "Введите тег для клиента:",
+        "Введите тег для клиента (например: @user):",
         reply_markup=types.ReplyKeyboardRemove()
     )
 
 @dp.message_handler(state=AddTagStates.waiting_for_tag)
 async def process_tag(message: types.Message, state: FSMContext):
     tag = message.text.strip()
+    
+    # Проверяем, что тег начинается с @
+    if not tag.startswith('@'):
+        await message.answer("❌ Тег должен начинаться с @ (например: @username):")
+        return
     
     existing_tag = get_tag_by_name(tag)
     if existing_tag:
@@ -404,7 +403,7 @@ async def process_deadline(message: types.Message, state: FSMContext):
     
     await state.finish()
     await message.answer(
-        f"✅ Клиент '{tag}' успешно добавлен!\n"
+        f"✅ Клиент {tag} успешно добавлен!\n"
         f"📅 Срок: {deadline}",
         reply_markup=get_main_keyboard(user_id)
     )
@@ -548,14 +547,10 @@ async def view_all_clients(message: types.Message, state: FSMContext):
         await message.answer("У вас нет клиентов.")
         return
     
-    # Сохраняем список в состоянии
     await state.update_data(clients_list=tags)
     await ClientListState.viewing.set()
     
-    # Получаем текущее время по Москве
     moscow_time = datetime.now(TIMEZONE).strftime("%H:%M")
-    
-    # Формируем начальную страницу
     page = 1
     await send_clients_page(message, user_id, tags, page, moscow_time)
 
@@ -571,7 +566,6 @@ async def send_clients_page(message_or_callback, user_id, tags, page, update_tim
         is_unsubscribed = item[4]
         has_payment = item[5]
         
-        # Определяем статус
         if has_payment:
             status = "💰"
         elif is_unsubscribed:
@@ -595,7 +589,6 @@ async def pagination_callback(callback_query: types.CallbackQuery, state: FSMCon
     page = int(callback_query.data.split('_')[1])
     user_id = callback_query.from_user.id
     
-    # Получаем сохраненный список из состояния
     data = await state.get_data()
     tags = data.get('clients_list', [])
     
