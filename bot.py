@@ -40,7 +40,6 @@ def init_db():
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     
-    # Таблица пользователей
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -50,7 +49,6 @@ def init_db():
     )
     ''')
     
-    # Таблица тегов
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS tags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +61,6 @@ def init_db():
     )
     ''')
     
-    # Таблица платежей
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +73,6 @@ def init_db():
     )
     ''')
     
-    # Таблица отписавшихся
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS unsubscribed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,7 +82,6 @@ def init_db():
     )
     ''')
     
-    # Добавляем админа если его нет
     cursor.execute("INSERT OR IGNORE INTO users (user_id, username, is_admin) VALUES (?, ?, ?)", 
                   (ADMIN_ID, "admin", 1))
     
@@ -125,14 +120,6 @@ def get_tag_by_name(tag_name):
     tag = cursor.fetchone()
     conn.close()
     return tag
-
-def get_user_tags(user_id):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM tags WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC", (user_id,))
-    tags = cursor.fetchall()
-    conn.close()
-    return tags
 
 def get_user_active_tags(user_id):
     conn = sqlite3.connect('bot_database.db')
@@ -221,7 +208,6 @@ def get_user_stats(user_id):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     
-    # Получаем теги пользователя
     cursor.execute("SELECT id FROM tags WHERE user_id = ? AND is_active = 1", (user_id,))
     tags = cursor.fetchall()
     tag_ids = [tag[0] for tag in tags]
@@ -235,22 +221,18 @@ def get_user_stats(user_id):
     }
     
     if tag_ids:
-        # Сумма платежей
         placeholders = ','.join('?' * len(tag_ids))
         cursor.execute(f"SELECT SUM(amount_rub) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
         result = cursor.fetchone()[0]
         stats['total_payments'] = result if result else 0
         
-        # Сумма профита
         cursor.execute(f"SELECT SUM(profit) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
         result = cursor.fetchone()[0]
         stats['total_profit'] = result if result else 0
         
-        # Количество отписавшихся
         cursor.execute(f"SELECT COUNT(*) FROM unsubscribed WHERE tag_id IN ({placeholders})", tag_ids)
         stats['unsubscribed_count'] = cursor.fetchone()[0]
         
-        # Сумма за отписавшихся (0.5$ за каждого)
         stats['refund_amount'] = stats['unsubscribed_count'] * 0.5
     
     conn.close()
@@ -268,51 +250,27 @@ def get_team_stats():
         'total_unsubscribed': 0
     }
     
-    # Активные работники (пользователи с активными тегами)
     cursor.execute("SELECT COUNT(DISTINCT user_id) FROM tags WHERE is_active = 1")
     stats['active_workers'] = cursor.fetchone()[0]
     
-    # Общая сумма оплат
     cursor.execute("SELECT SUM(amount_rub) FROM payments")
     result = cursor.fetchone()[0]
     stats['total_payments'] = result if result else 0
     
-    # Общая сумма профитов
     cursor.execute("SELECT SUM(profit) FROM payments")
     result = cursor.fetchone()[0]
     stats['total_profit'] = result if result else 0
     
-    # Общее количество клиентов
     cursor.execute("SELECT COUNT(*) FROM tags WHERE is_active = 1")
     stats['total_clients'] = cursor.fetchone()[0]
     
-    # Общее количество отписавшихся
     cursor.execute("SELECT COUNT(*) FROM unsubscribed")
     stats['total_unsubscribed'] = cursor.fetchone()[0]
     
     conn.close()
     return stats
 
-# Клавиатуры
-def get_main_keyboard(user_id):
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    user = get_user(user_id)
-    is_admin = user[3] if user else 0
-    
-    buttons = [KeyboardButton("➕ Добавить тег")]
-    
-    if is_admin:
-        buttons.append(KeyboardButton("💰 Добавить профит"))
-        buttons.append(KeyboardButton("📝 Пометить отписавших"))
-        buttons.append(KeyboardButton("📊 Статистика команды"))
-    
-    buttons.append(KeyboardButton("👥 Клиенты"))
-    buttons.append(KeyboardButton("📈 Личная статистика"))
-    
-    keyboard.row(*buttons)
-    return keyboard
-
-# Пагинация
+# Функции для пагинации
 def paginate_items(items, page, per_page=20):
     total_pages = math.ceil(len(items) / per_page)
     if page < 1:
@@ -331,17 +289,52 @@ def get_pagination_keyboard(current_page, total_pages, callback_prefix):
     buttons = []
     
     if current_page > 1:
-        buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"{callback_prefix}_page_{current_page-1}"))
+        buttons.append(InlineKeyboardButton("⬅️", callback_data=f"{callback_prefix}_page_{current_page-1}"))
     
     buttons.append(InlineKeyboardButton(f"{current_page}/{total_pages}", callback_data="current"))
     
     if current_page < total_pages:
-        buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"{callback_prefix}_page_{current_page+1}"))
+        buttons.append(InlineKeyboardButton("➡️", callback_data=f"{callback_prefix}_page_{current_page+1}"))
     
     if buttons:
         keyboard.row(*buttons)
     
     keyboard.row(InlineKeyboardButton("❌ Закрыть", callback_data="close"))
+    return keyboard
+
+# Улучшенное меню
+def get_main_keyboard(user_id):
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+    user = get_user(user_id)
+    is_admin = user[3] if user else 0
+    
+    # Первый ряд - основные функции
+    buttons_row1 = [KeyboardButton("📝 Добавить клиента")]
+    
+    # Второй ряд - для админа
+    if is_admin:
+        buttons_row2 = [
+            KeyboardButton("💰 Добавить профит"),
+            KeyboardButton("📌 Отметить отписку")
+        ]
+        buttons_row3 = [
+            KeyboardButton("📊 Статистика команды"),
+            KeyboardButton("👥 Мои клиенты")
+        ]
+    else:
+        buttons_row2 = [KeyboardButton("👥 Мои клиенты")]
+        buttons_row3 = []
+    
+    # Четвертый ряд - статистика
+    buttons_row4 = [KeyboardButton("📈 Личная статистика")]
+    
+    keyboard.row(*buttons_row1)
+    if buttons_row2:
+        keyboard.row(*buttons_row2)
+    if buttons_row3:
+        keyboard.row(*buttons_row3)
+    keyboard.row(*buttons_row4)
+    
     return keyboard
 
 # Обработчики команд
@@ -355,11 +348,11 @@ async def start_command(message: types.Message):
     
     await message.answer(
         "👋 Добро пожаловать в бот!\n\n"
-        "Выберите действие:",
+        "Выберите действие в меню:",
         reply_markup=get_main_keyboard(user_id)
     )
 
-@dp.message_handler(lambda message: message.text == "➕ Добавить тег")
+@dp.message_handler(lambda message: message.text == "📝 Добавить клиента")
 async def add_tag_start(message: types.Message):
     await AddTagStates.waiting_for_tag.set()
     await message.answer(
@@ -398,7 +391,7 @@ async def process_deadline(message: types.Message, state: FSMContext):
     
     await state.finish()
     await message.answer(
-        f"✅ Тег '{tag}' успешно добавлен!\n"
+        f"✅ Клиент '{tag}' успешно добавлен!\n"
         f"📅 Срок: {deadline}",
         reply_markup=get_main_keyboard(user_id)
     )
@@ -450,7 +443,7 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
         amount_usd = data['amount_usd']
         
         profit_rub = calculate_profit(amount_rub)
-        profit_usd = profit_rub / amount_rub * amount_usd
+        profit_usd = (profit_rub / amount_rub) * amount_usd if amount_rub > 0 else 0
         
         add_payment(tag_id, amount_usd, amount_rub, profit_rub)
         
@@ -460,25 +453,27 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
         user_id = cursor.fetchone()[0]
         conn.close()
         
+        # Отправляем уведомление пользователю
         await bot.send_message(
             user_id,
-            f"💰 Новый профит!\n"
-            f"Сумма: {amount_usd}$\n"
-            f"Ваша выплата: {profit_usd:.2f}$"
+            f"💰 Новый профит!\n\n"
+            f"💵 Сумма: {amount_rub}₽\n"
+            f"💲 Ваша выплата: {profit_usd:.2f}$"
         )
         
         await state.finish()
         await message.answer(
-            f"✅ Профит успешно добавлен!\n"
-            f"💵 Сумма: {amount_usd}$ = {amount_rub}₽\n"
-            f"📊 Выплата: {profit_usd:.2f}$",
+            f"✅ Профит успешно добавлен!\n\n"
+            f"💵 Сумма в $: {amount_usd}$\n"
+            f"💵 Сумма в ₽: {amount_rub}₽\n"
+            f"💲 Выплата: {profit_usd:.2f}$",
             reply_markup=get_main_keyboard(ADMIN_ID)
         )
         
     except ValueError:
         await message.answer("❌ Введите корректное число:")
 
-@dp.message_handler(lambda message: message.text == "📝 Пометить отписавших")
+@dp.message_handler(lambda message: message.text == "📌 Отметить отписку")
 async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user = get_user(user_id)
@@ -493,9 +488,9 @@ async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
         await message.answer("✅ Нет активных тегов для отметки!")
         return
     
-    tags_list = "📋 Список клиентов для отметки:\n\n"
+    tags_list = "📋 Список клиентов для отметки отписки:\n\n"
     for i, tag in enumerate(unsubscribed_tags, 1):
-        tags_list += f"{i}. Тег: {tag[1]} (Пользователь: @{tag[2]})\n"
+        tags_list += f"{i}. {tag[1]} (@{tag[2]})\n"
     
     tags_list += "\nВведите номера через запятую (например: 1,2,3,4,5)"
     
@@ -532,15 +527,15 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
     except ValueError:
         await message.answer("❌ Введите номера через запятую (например: 1,2,3,4,5):")
 
-@dp.message_handler(lambda message: message.text == "👥 Клиенты")
+@dp.message_handler(lambda message: message.text == "👥 Мои клиенты")
 async def clients_menu(message: types.Message):
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
-        InlineKeyboardButton(text="📋 Не отписавшиеся", callback_data="view_active"),
-        InlineKeyboardButton(text="📋 Отписавшиеся", callback_data="view_unsubscribed"),
-        InlineKeyboardButton(text="📋 Все клиенты", callback_data="view_all")
+        InlineKeyboardButton(text="✅ Активные", callback_data="view_active"),
+        InlineKeyboardButton(text="❌ Отписавшиеся", callback_data="view_unsubscribed"),
+        InlineKeyboardButton(text="👥 Все клиенты", callback_data="view_all")
     )
-    await message.answer("Выберите действие:", reply_markup=keyboard)
+    await message.answer("📋 Выберите список клиентов:", reply_markup=keyboard)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("view_active"))
 async def view_active_clients(callback_query: types.CallbackQuery):
@@ -548,12 +543,12 @@ async def view_active_clients(callback_query: types.CallbackQuery):
     tags = get_user_active_tags(user_id)
     
     if not tags:
-        await bot.send_message(callback_query.from_user.id, "У вас нет активных клиентов.")
+        await bot.send_message(callback_query.from_user.id, "✅ У вас нет активных клиентов.")
         await callback_query.answer()
         return
     
     await callback_query.answer()
-    await send_paginated_list(callback_query.from_user.id, tags, "active", "Активные клиенты")
+    await send_paginated_list(callback_query.from_user.id, tags, "active", "✅ Активные клиенты")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("view_unsubscribed"))
 async def view_unsubscribed_clients(callback_query: types.CallbackQuery):
@@ -561,12 +556,12 @@ async def view_unsubscribed_clients(callback_query: types.CallbackQuery):
     tags = get_user_unsubscribed_tags(user_id)
     
     if not tags:
-        await bot.send_message(callback_query.from_user.id, "У вас нет отписавшихся клиентов.")
+        await bot.send_message(callback_query.from_user.id, "❌ У вас нет отписавшихся клиентов.")
         await callback_query.answer()
         return
     
     await callback_query.answer()
-    await send_paginated_list(callback_query.from_user.id, tags, "unsubscribed", "Отписавшиеся клиенты")
+    await send_paginated_list(callback_query.from_user.id, tags, "unsubscribed", "❌ Отписавшиеся клиенты")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("view_all"))
 async def view_all_clients(callback_query: types.CallbackQuery):
@@ -579,7 +574,7 @@ async def view_all_clients(callback_query: types.CallbackQuery):
         return
     
     await callback_query.answer()
-    await send_paginated_list(callback_query.from_user.id, tags, "all", "Все клиенты")
+    await send_paginated_list(callback_query.from_user.id, tags, "all", "👥 Все клиенты")
 
 async def send_paginated_list(user_id, tags, list_type, title):
     page = 1
@@ -588,16 +583,16 @@ async def send_paginated_list(user_id, tags, list_type, title):
 async def send_list_page(user_id, tags, list_type, title, page):
     items, page, total_pages = paginate_items(tags, page)
     
-    text = f"📋 {title} (стр. {page}/{total_pages}):\n\n"
+    text = f"{title} (стр. {page}/{total_pages}):\n\n"
     for item in items:
         if list_type == "active":
-            text += f"🔹 Тег: {item[1]}\n📅 Срок: {item[3]}\n\n"
+            text += f"🔹 {item[1]} | 📅 {item[3]}\n"
         elif list_type == "unsubscribed":
-            text += f"🔹 Тег: {item[1]}\n📅 Срок: {item[3]}\n📆 Отписался: {item[-1]}\n\n"
+            text += f"🔹 {item[1]} | 📅 {item[3]} | 📆 {item[-1][:10]}\n"
         else:  # all
             is_unsubscribed = item[-1]
-            status = "❌ Отписался" if is_unsubscribed else "✅ Активен"
-            text += f"🔹 Тег: {item[1]}\n📅 Срок: {item[3]}\n📊 Статус: {status}\n\n"
+            status = "❌" if is_unsubscribed else "✅"
+            text += f"{status} {item[1]} | 📅 {item[3]}\n"
     
     keyboard = get_pagination_keyboard(page, total_pages, list_type)
     await bot.send_message(user_id, text, reply_markup=keyboard)
@@ -615,13 +610,13 @@ async def pagination_callback(callback_query: types.CallbackQuery):
     
     if list_type == "active":
         tags = get_user_active_tags(user_id)
-        title = "Активные клиенты"
+        title = "✅ Активные клиенты"
     elif list_type == "unsubscribed":
         tags = get_user_unsubscribed_tags(user_id)
-        title = "Отписавшиеся клиенты"
+        title = "❌ Отписавшиеся клиенты"
     else:
         tags = get_all_user_tags(user_id)
-        title = "Все клиенты"
+        title = "👥 Все клиенты"
     
     await callback_query.message.delete()
     await send_list_page(user_id, tags, list_type, title, page)
@@ -666,12 +661,7 @@ async def team_stats(message: types.Message):
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
-@dp.message_handler(lambda message: message.text == "Назад")
-async def back_to_menu(message: types.Message):
-    user_id = message.from_user.id
-    await message.answer("Главное меню:", reply_markup=get_main_keyboard(user_id))
-
 if __name__ == "__main__":
     init_db()
-    print("Бот запущен!")
+    print("🚀 Бот запущен!")
     executor.start_polling(dp, skip_updates=True)
