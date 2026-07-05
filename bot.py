@@ -10,6 +10,7 @@ from aiogram.utils import executor
 import sqlite3
 import math
 import pytz
+import re
 
 # Конфигурация
 TOKEN = "8623083352:AAHPhZkAFymFxs272OO_YYECCeXQUXfH8is"
@@ -26,8 +27,7 @@ dp = Dispatcher(bot, storage=storage)
 
 # Состояния для FSM
 class AddTagStates(StatesGroup):
-    waiting_for_tag = State()
-    waiting_for_deadline = State()
+    waiting_for_tag_and_deadline = State()
 
 class AdminAddProfit(StatesGroup):
     waiting_for_tag = State()
@@ -361,44 +361,61 @@ async def start_state_handler(message: types.Message, state: FSMContext):
 
 @dp.message_handler(lambda message: message.text == "📝 Добавить клиента")
 async def add_tag_start(message: types.Message):
-    await AddTagStates.waiting_for_tag.set()
+    await AddTagStates.waiting_for_tag_and_deadline.set()
     await message.answer(
-        "Введите тег для клиента (например: @user):",
+        "Введите тег и срок одним сообщением:\n"
+        "Формат: @user ДД.ММ\n"
+        "Пример: @username 31.12",
         reply_markup=types.ReplyKeyboardRemove()
     )
 
-@dp.message_handler(state=AddTagStates.waiting_for_tag)
-async def process_tag(message: types.Message, state: FSMContext):
-    tag = message.text.strip()
+@dp.message_handler(state=AddTagStates.waiting_for_tag_and_deadline)
+async def process_tag_and_deadline(message: types.Message, state: FSMContext):
+    text = message.text.strip()
     
-    # Проверяем, что тег начинается с @
-    if not tag.startswith('@'):
-        await message.answer("❌ Тег должен начинаться с @ (например: @username):")
+    # Разбиваем на части
+    parts = text.split()
+    
+    if len(parts) < 2:
+        await message.answer(
+            "❌ Неверный формат!\n"
+            "Введите: @user ДД.ММ\n"
+            "Пример: @username 31.12"
+        )
         return
     
+    # Проверяем, что тег начинается с @
+    tag = parts[0]
+    if not tag.startswith('@'):
+        await message.answer(
+            "❌ Тег должен начинаться с @\n"
+            "Введите: @user ДД.ММ\n"
+            "Пример: @username 31.12"
+        )
+        return
+    
+    # Собираем дату (может быть несколько частей, если дата с пробелами)
+    deadline = ' '.join(parts[1:])
+    
+    # Проверяем формат даты
+    try:
+        datetime.strptime(deadline, "%d.%m")
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат даты!\n"
+            "Используйте ДД.ММ\n"
+            "Пример: 31.12"
+        )
+        return
+    
+    # Проверяем, существует ли уже такой тег
     existing_tag = get_tag_by_name(tag)
     if existing_tag:
         await message.answer("❌ Такой тег уже существует! Введите другой тег:")
         return
     
-    await state.update_data(tag=tag)
-    await AddTagStates.waiting_for_deadline.set()
-    await message.answer("Введите срок (в формате ДД.ММ):")
-
-@dp.message_handler(state=AddTagStates.waiting_for_deadline)
-async def process_deadline(message: types.Message, state: FSMContext):
-    deadline = message.text.strip()
-    
-    try:
-        datetime.strptime(deadline, "%d.%m")
-    except ValueError:
-        await message.answer("❌ Неверный формат! Используйте ДД.ММ (например, 31.12):")
-        return
-    
-    data = await state.get_data()
-    tag = data['tag']
+    # Сохраняем в базу
     user_id = message.from_user.id
-    
     add_tag(user_id, tag, deadline)
     
     await state.finish()
