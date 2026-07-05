@@ -8,6 +8,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
 import sqlite3
+import math
 
 # Конфигурация
 TOKEN = "8623083352:AAHPhZkAFymFxs272OO_YYECCeXQUXfH8is"
@@ -57,6 +58,7 @@ def init_db():
         user_id INTEGER,
         deadline TEXT,
         is_active BOOLEAN DEFAULT 1,
+        created_at TEXT,
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )
     ''')
@@ -111,8 +113,8 @@ def add_user(user_id, username, full_name):
 def add_tag(user_id, tag, deadline):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO tags (user_id, tag, deadline) VALUES (?, ?, ?)", 
-                  (user_id, tag, deadline))
+    cursor.execute("INSERT INTO tags (user_id, tag, deadline, created_at) VALUES (?, ?, ?, ?)", 
+                  (user_id, tag, deadline, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -127,7 +129,49 @@ def get_tag_by_name(tag_name):
 def get_user_tags(user_id):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM tags WHERE user_id = ? AND is_active = 1", (user_id,))
+    cursor.execute("SELECT * FROM tags WHERE user_id = ? AND is_active = 1 ORDER BY created_at DESC", (user_id,))
+    tags = cursor.fetchall()
+    conn.close()
+    return tags
+
+def get_user_active_tags(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.* FROM tags t 
+    WHERE t.user_id = ? AND t.is_active = 1 
+    AND t.id NOT IN (SELECT tag_id FROM unsubscribed)
+    ORDER BY t.created_at DESC
+    ''', (user_id,))
+    tags = cursor.fetchall()
+    conn.close()
+    return tags
+
+def get_user_unsubscribed_tags(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.*, u.unsubscribed_date 
+    FROM tags t 
+    JOIN unsubscribed u ON t.id = u.tag_id 
+    WHERE t.user_id = ?
+    ORDER BY u.unsubscribed_date DESC
+    ''', (user_id,))
+    tags = cursor.fetchall()
+    conn.close()
+    return tags
+
+def get_all_user_tags(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT t.*, 
+           CASE WHEN u.tag_id IS NOT NULL THEN 1 ELSE 0 END as is_unsubscribed
+    FROM tags t 
+    LEFT JOIN unsubscribed u ON t.id = u.tag_id 
+    WHERE t.user_id = ? AND t.is_active = 1
+    ORDER BY t.created_at DESC
+    ''', (user_id,))
     tags = cursor.fetchall()
     conn.close()
     return tags
@@ -157,19 +201,7 @@ def get_unsubscribed_tags():
     JOIN users u ON t.user_id = u.user_id 
     WHERE t.is_active = 1 
     AND t.id NOT IN (SELECT tag_id FROM unsubscribed)
-    ''')
-    tags = cursor.fetchall()
-    conn.close()
-    return tags
-
-def get_all_unsubscribed_tags():
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT t.id, t.tag, u.username, u.user_id 
-    FROM tags t 
-    JOIN users u ON t.user_id = u.user_id 
-    WHERE t.id IN (SELECT tag_id FROM unsubscribed)
+    ORDER BY t.created_at DESC
     ''')
     tags = cursor.fetchall()
     conn.close()
@@ -277,7 +309,39 @@ def get_main_keyboard(user_id):
     buttons.append(KeyboardButton("👥 Клиенты"))
     buttons.append(KeyboardButton("📈 Личная статистика"))
     
-    keyboard.add(*buttons)
+    keyboard.row(*buttons)
+    return keyboard
+
+# Пагинация
+def paginate_items(items, page, per_page=20):
+    total_pages = math.ceil(len(items) / per_page)
+    if page < 1:
+        page = 1
+    if page > total_pages and total_pages > 0:
+        page = total_pages
+    
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_items = items[start:end]
+    
+    return page_items, page, total_pages
+
+def get_pagination_keyboard(current_page, total_pages, callback_prefix):
+    keyboard = InlineKeyboardMarkup(row_width=3)
+    buttons = []
+    
+    if current_page > 1:
+        buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"{callback_prefix}_page_{current_page-1}"))
+    
+    buttons.append(InlineKeyboardButton(f"{current_page}/{total_pages}", callback_data="current"))
+    
+    if current_page < total_pages:
+        buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"{callback_prefix}_page_{current_page+1}"))
+    
+    if buttons:
+        keyboard.row(*buttons)
+    
+    keyboard.row(InlineKeyboardButton("❌ Закрыть", callback_data="close"))
     return keyboard
 
 # Обработчики команд
@@ -307,7 +371,6 @@ async def add_tag_start(message: types.Message):
 async def process_tag(message: types.Message, state: FSMContext):
     tag = message.text.strip()
     
-    # Проверяем, существует ли уже такой тег
     existing_tag = get_tag_by_name(tag)
     if existing_tag:
         await message.answer("❌ Такой тег уже существует! Введите другой тег:")
@@ -321,7 +384,6 @@ async def process_tag(message: types.Message, state: FSMContext):
 async def process_deadline(message: types.Message, state: FSMContext):
     deadline = message.text.strip()
     
-    # Простая проверка формата
     try:
         datetime.strptime(deadline, "%d.%m")
     except ValueError:
@@ -346,7 +408,7 @@ async def admin_add_profit_start(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
     
-    if not user or not user[3]:  # Проверка на админа
+    if not user or not user[3]:
         await message.answer("❌ У вас нет прав для этого действия!")
         return
     
@@ -387,32 +449,29 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
         tag_id = data['tag_id']
         amount_usd = data['amount_usd']
         
-        # Рассчитываем профит
-        profit = calculate_profit(amount_rub)
+        profit_rub = calculate_profit(amount_rub)
+        profit_usd = profit_rub / amount_rub * amount_usd
         
-        # Сохраняем платеж
-        add_payment(tag_id, amount_usd, amount_rub, profit)
+        add_payment(tag_id, amount_usd, amount_rub, profit_rub)
         
-        # Получаем информацию о пользователе
         conn = sqlite3.connect('bot_database.db')
         cursor = conn.cursor()
         cursor.execute("SELECT user_id FROM tags WHERE id = ?", (tag_id,))
         user_id = cursor.fetchone()[0]
         conn.close()
         
-        # Отправляем уведомление пользователю
         await bot.send_message(
             user_id,
             f"💰 Новый профит!\n"
-            f"Сумма: {amount_rub}₽\n"
-            f"Ваша выплата: {profit:.2f}₽"
+            f"Сумма: {amount_usd}$\n"
+            f"Ваша выплата: {profit_usd:.2f}$"
         )
         
         await state.finish()
         await message.answer(
             f"✅ Профит успешно добавлен!\n"
             f"💵 Сумма: {amount_usd}$ = {amount_rub}₽\n"
-            f"📊 Выплата: {profit:.2f}₽",
+            f"📊 Выплата: {profit_usd:.2f}$",
             reply_markup=get_main_keyboard(ADMIN_ID)
         )
         
@@ -434,14 +493,12 @@ async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
         await message.answer("✅ Нет активных тегов для отметки!")
         return
     
-    # Формируем список
     tags_list = "📋 Список клиентов для отметки:\n\n"
     for i, tag in enumerate(unsubscribed_tags, 1):
         tags_list += f"{i}. Тег: {tag[1]} (Пользователь: @{tag[2]})\n"
     
     tags_list += "\nВведите номера через запятую (например: 1,2,3,4,5)"
     
-    # Сохраняем список тегов в состояние
     await state.update_data(tags_list=unsubscribed_tags)
     await MarkUnsubscribed.waiting_for_selection.set()
     await message.answer(tags_list, reply_markup=types.ReplyKeyboardRemove())
@@ -449,12 +506,10 @@ async def mark_unsubscribed_start(message: types.Message, state: FSMContext):
 @dp.message_handler(state=MarkUnsubscribed.waiting_for_selection)
 async def process_unsubscribed_selection(message: types.Message, state: FSMContext):
     try:
-        # Парсим номера
         numbers = [int(x.strip()) for x in message.text.split(',')]
         data = await state.get_data()
         tags_list = data['tags_list']
         
-        # Проверяем корректность номеров
         max_index = len(tags_list)
         invalid_numbers = [n for n in numbers if n < 1 or n > max_index]
         
@@ -462,7 +517,6 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
             await message.answer(f"❌ Некорректные номера: {', '.join(map(str, invalid_numbers))}\nВведите номера от 1 до {max_index}:")
             return
         
-        # Отмечаем отписавшихся
         marked_count = 0
         for num in numbers:
             tag_id = tags_list[num-1][0]
@@ -482,51 +536,100 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
 async def clients_menu(message: types.Message):
     keyboard = InlineKeyboardMarkup(row_width=1)
     keyboard.add(
-        InlineKeyboardButton(text="📋 Посмотреть не отписавших", callback_data="view_active"),
-        InlineKeyboardButton(text="📋 Посмотреть отписавших", callback_data="view_unsubscribed")
+        InlineKeyboardButton(text="📋 Не отписавшиеся", callback_data="view_active"),
+        InlineKeyboardButton(text="📋 Отписавшиеся", callback_data="view_unsubscribed"),
+        InlineKeyboardButton(text="📋 Все клиенты", callback_data="view_all")
     )
     await message.answer("Выберите действие:", reply_markup=keyboard)
 
-@dp.callback_query_handler(lambda c: c.data == "view_active")
+@dp.callback_query_handler(lambda c: c.data.startswith("view_active"))
 async def view_active_clients(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    tags = get_user_tags(user_id)
+    tags = get_user_active_tags(user_id)
     
     if not tags:
         await bot.send_message(callback_query.from_user.id, "У вас нет активных клиентов.")
+        await callback_query.answer()
         return
     
-    text = "📋 Ваши активные клиенты:\n\n"
-    for tag in tags:
-        text += f"🔹 Тег: {tag[1]}\n📅 Срок: {tag[3]}\n\n"
-    
-    await bot.send_message(callback_query.from_user.id, text)
     await callback_query.answer()
+    await send_paginated_list(callback_query.from_user.id, tags, "active", "Активные клиенты")
 
-@dp.callback_query_handler(lambda c: c.data == "view_unsubscribed")
+@dp.callback_query_handler(lambda c: c.data.startswith("view_unsubscribed"))
 async def view_unsubscribed_clients(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT t.tag, t.deadline, u.unsubscribed_date 
-    FROM tags t 
-    JOIN unsubscribed u ON t.id = u.tag_id 
-    WHERE t.user_id = ?
-    ''', (user_id,))
-    tags = cursor.fetchall()
-    conn.close()
+    tags = get_user_unsubscribed_tags(user_id)
     
     if not tags:
         await bot.send_message(callback_query.from_user.id, "У вас нет отписавшихся клиентов.")
+        await callback_query.answer()
         return
     
-    text = "📋 Ваши отписавшиеся клиенты:\n\n"
-    for tag in tags:
-        text += f"🔹 Тег: {tag[0]}\n📅 Срок: {tag[1]}\n📆 Отписался: {tag[2]}\n\n"
+    await callback_query.answer()
+    await send_paginated_list(callback_query.from_user.id, tags, "unsubscribed", "Отписавшиеся клиенты")
+
+@dp.callback_query_handler(lambda c: c.data.startswith("view_all"))
+async def view_all_clients(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    tags = get_all_user_tags(user_id)
     
-    await bot.send_message(callback_query.from_user.id, text)
+    if not tags:
+        await bot.send_message(callback_query.from_user.id, "У вас нет клиентов.")
+        await callback_query.answer()
+        return
+    
+    await callback_query.answer()
+    await send_paginated_list(callback_query.from_user.id, tags, "all", "Все клиенты")
+
+async def send_paginated_list(user_id, tags, list_type, title):
+    page = 1
+    await send_list_page(user_id, tags, list_type, title, page)
+
+async def send_list_page(user_id, tags, list_type, title, page):
+    items, page, total_pages = paginate_items(tags, page)
+    
+    text = f"📋 {title} (стр. {page}/{total_pages}):\n\n"
+    for item in items:
+        if list_type == "active":
+            text += f"🔹 Тег: {item[1]}\n📅 Срок: {item[3]}\n\n"
+        elif list_type == "unsubscribed":
+            text += f"🔹 Тег: {item[1]}\n📅 Срок: {item[3]}\n📆 Отписался: {item[-1]}\n\n"
+        else:  # all
+            is_unsubscribed = item[-1]
+            status = "❌ Отписался" if is_unsubscribed else "✅ Активен"
+            text += f"🔹 Тег: {item[1]}\n📅 Срок: {item[3]}\n📊 Статус: {status}\n\n"
+    
+    keyboard = get_pagination_keyboard(page, total_pages, list_type)
+    await bot.send_message(user_id, text, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("active_page_") or 
+                                   c.data.startswith("unsubscribed_page_") or 
+                                   c.data.startswith("all_page_"))
+async def pagination_callback(callback_query: types.CallbackQuery):
+    data = callback_query.data
+    parts = data.split('_')
+    list_type = parts[0]
+    page = int(parts[2])
+    
+    user_id = callback_query.from_user.id
+    
+    if list_type == "active":
+        tags = get_user_active_tags(user_id)
+        title = "Активные клиенты"
+    elif list_type == "unsubscribed":
+        tags = get_user_unsubscribed_tags(user_id)
+        title = "Отписавшиеся клиенты"
+    else:
+        tags = get_all_user_tags(user_id)
+        title = "Все клиенты"
+    
+    await callback_query.message.delete()
+    await send_list_page(user_id, tags, list_type, title, page)
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "close")
+async def close_callback(callback_query: types.CallbackQuery):
+    await callback_query.message.delete()
     await callback_query.answer()
 
 @dp.message_handler(lambda message: message.text == "📈 Личная статистика")
@@ -563,7 +666,6 @@ async def team_stats(message: types.Message):
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
-# Обработчик для возврата в главное меню
 @dp.message_handler(lambda message: message.text == "Назад")
 async def back_to_menu(message: types.Message):
     user_id = message.from_user.id
