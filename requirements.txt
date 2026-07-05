@@ -1,2 +1,1 @@
-aiogram==3.4.1
-aiogram-fsm==0.0.1
+aiogram==2.25.1
