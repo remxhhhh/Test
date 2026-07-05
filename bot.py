@@ -9,10 +9,12 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.utils import executor
 import sqlite3
 import math
+import pytz
 
 # Конфигурация
 TOKEN = "8623083352:AAHPhZkAFymFxs272OO_YYECCeXQUXfH8is"
 ADMIN_ID = 2010296191
+TIMEZONE = pytz.timezone('Europe/Moscow')
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -75,7 +77,7 @@ def init_db():
     
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS unsubscribed (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY AUTOINLINE,
         tag_id INTEGER,
         unsubscribed_date TEXT,
         FOREIGN KEY (tag_id) REFERENCES tags (id)
@@ -121,41 +123,16 @@ def get_tag_by_name(tag_name):
     conn.close()
     return tag
 
-def get_user_active_tags(user_id):
+def get_all_user_tags_with_status(user_id):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     cursor.execute('''
-    SELECT t.* FROM tags t 
-    WHERE t.user_id = ? AND t.is_active = 1 
-    AND t.id NOT IN (SELECT tag_id FROM unsubscribed)
-    ORDER BY t.created_at DESC
-    ''', (user_id,))
-    tags = cursor.fetchall()
-    conn.close()
-    return tags
-
-def get_user_unsubscribed_tags(user_id):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT t.*, u.unsubscribed_date 
-    FROM tags t 
-    JOIN unsubscribed u ON t.id = u.tag_id 
-    WHERE t.user_id = ?
-    ORDER BY u.unsubscribed_date DESC
-    ''', (user_id,))
-    tags = cursor.fetchall()
-    conn.close()
-    return tags
-
-def get_all_user_tags(user_id):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT t.*, 
-           CASE WHEN u.tag_id IS NOT NULL THEN 1 ELSE 0 END as is_unsubscribed
+    SELECT t.id, t.tag, t.deadline, t.created_at,
+           CASE WHEN u.tag_id IS NOT NULL THEN 1 ELSE 0 END as is_unsubscribed,
+           CASE WHEN p.tag_id IS NOT NULL THEN 1 ELSE 0 END as has_payment
     FROM tags t 
     LEFT JOIN unsubscribed u ON t.id = u.tag_id 
+    LEFT JOIN payments p ON t.id = p.tag_id
     WHERE t.user_id = ? AND t.is_active = 1
     ORDER BY t.created_at DESC
     ''', (user_id,))
@@ -213,8 +190,10 @@ def get_user_stats(user_id):
     tag_ids = [tag[0] for tag in tags]
     
     stats = {
-        'total_payments': 0,
-        'total_profit': 0,
+        'total_payments_usd': 0,
+        'total_payments_rub': 0,
+        'total_profit_usd': 0,
+        'total_profit_rub': 0,
         'clients_count': len(tags),
         'unsubscribed_count': 0,
         'refund_amount': 0
@@ -222,17 +201,32 @@ def get_user_stats(user_id):
     
     if tag_ids:
         placeholders = ','.join('?' * len(tag_ids))
+        
+        # Сумма платежей в рублях
         cursor.execute(f"SELECT SUM(amount_rub) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
         result = cursor.fetchone()[0]
-        stats['total_payments'] = result if result else 0
+        stats['total_payments_rub'] = result if result else 0
         
+        # Сумма платежей в долларах
+        cursor.execute(f"SELECT SUM(amount_usd) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
+        result = cursor.fetchone()[0]
+        stats['total_payments_usd'] = result if result else 0
+        
+        # Сумма профитов в рублях
         cursor.execute(f"SELECT SUM(profit) FROM payments WHERE tag_id IN ({placeholders})", tag_ids)
         result = cursor.fetchone()[0]
-        stats['total_profit'] = result if result else 0
+        stats['total_profit_rub'] = result if result else 0
         
+        # Сумма профитов в долларах
+        cursor.execute(f"SELECT SUM(amount_usd * profit / amount_rub) FROM payments WHERE tag_id IN ({placeholders}) AND amount_rub > 0", tag_ids)
+        result = cursor.fetchone()[0]
+        stats['total_profit_usd'] = result if result else 0
+        
+        # Количество отписавшихся
         cursor.execute(f"SELECT COUNT(*) FROM unsubscribed WHERE tag_id IN ({placeholders})", tag_ids)
         stats['unsubscribed_count'] = cursor.fetchone()[0]
         
+        # Сумма за отписавшихся (0.5$ за каждого)
         stats['refund_amount'] = stats['unsubscribed_count'] * 0.5
     
     conn.close()
@@ -244,26 +238,43 @@ def get_team_stats():
     
     stats = {
         'active_workers': 0,
-        'total_payments': 0,
-        'total_profit': 0,
+        'total_payments_usd': 0,
+        'total_payments_rub': 0,
+        'total_profit_usd': 0,
+        'total_profit_rub': 0,
         'total_clients': 0,
         'total_unsubscribed': 0
     }
     
+    # Активные работники (пользователи с активными тегами)
     cursor.execute("SELECT COUNT(DISTINCT user_id) FROM tags WHERE is_active = 1")
     stats['active_workers'] = cursor.fetchone()[0]
     
+    # Общая сумма оплат в рублях
     cursor.execute("SELECT SUM(amount_rub) FROM payments")
     result = cursor.fetchone()[0]
-    stats['total_payments'] = result if result else 0
+    stats['total_payments_rub'] = result if result else 0
     
+    # Общая сумма оплат в долларах
+    cursor.execute("SELECT SUM(amount_usd) FROM payments")
+    result = cursor.fetchone()[0]
+    stats['total_payments_usd'] = result if result else 0
+    
+    # Общая сумма профитов в рублях
     cursor.execute("SELECT SUM(profit) FROM payments")
     result = cursor.fetchone()[0]
-    stats['total_profit'] = result if result else 0
+    stats['total_profit_rub'] = result if result else 0
     
+    # Общая сумма профитов в долларах
+    cursor.execute("SELECT SUM(amount_usd * profit / amount_rub) FROM payments WHERE amount_rub > 0")
+    result = cursor.fetchone()[0]
+    stats['total_profit_usd'] = result if result else 0
+    
+    # Общее количество клиентов
     cursor.execute("SELECT COUNT(*) FROM tags WHERE is_active = 1")
     stats['total_clients'] = cursor.fetchone()[0]
     
+    # Общее количество отписавшихся
     cursor.execute("SELECT COUNT(*) FROM unsubscribed")
     stats['total_unsubscribed'] = cursor.fetchone()[0]
     
@@ -284,21 +295,22 @@ def paginate_items(items, page, per_page=20):
     
     return page_items, page, total_pages
 
-def get_pagination_keyboard(current_page, total_pages, callback_prefix):
+def get_pagination_keyboard(current_page, total_pages):
     keyboard = InlineKeyboardMarkup(row_width=3)
     buttons = []
     
     if current_page > 1:
-        buttons.append(InlineKeyboardButton("⬅️", callback_data=f"{callback_prefix}_page_{current_page-1}"))
+        buttons.append(InlineKeyboardButton("⬅️", callback_data=f"page_{current_page-1}"))
     
     buttons.append(InlineKeyboardButton(f"{current_page}/{total_pages}", callback_data="current"))
     
     if current_page < total_pages:
-        buttons.append(InlineKeyboardButton("➡️", callback_data=f"{callback_prefix}_page_{current_page+1}"))
+        buttons.append(InlineKeyboardButton("➡️", callback_data=f"page_{current_page+1}"))
     
     if buttons:
         keyboard.row(*buttons)
     
+    keyboard.row(InlineKeyboardButton("🔄 Обновить", callback_data="refresh"))
     keyboard.row(InlineKeyboardButton("❌ Закрыть", callback_data="close"))
     return keyboard
 
@@ -308,10 +320,8 @@ def get_main_keyboard(user_id):
     user = get_user(user_id)
     is_admin = user[3] if user else 0
     
-    # Первый ряд - основные функции
     buttons_row1 = [KeyboardButton("📝 Добавить клиента")]
     
-    # Второй ряд - для админа
     if is_admin:
         buttons_row2 = [
             KeyboardButton("💰 Добавить профит"),
@@ -325,7 +335,6 @@ def get_main_keyboard(user_id):
         buttons_row2 = [KeyboardButton("👥 Мои клиенты")]
         buttons_row3 = []
     
-    # Четвертый ряд - статистика
     buttons_row4 = [KeyboardButton("📈 Личная статистика")]
     
     keyboard.row(*buttons_row1)
@@ -340,7 +349,6 @@ def get_main_keyboard(user_id):
 # Обработчики команд
 @dp.message_handler(commands=["start"])
 async def start_command(message: types.Message, state: FSMContext):
-    # Полностью сбрасываем все состояния
     await state.finish()
     
     user_id = message.from_user.id
@@ -349,7 +357,6 @@ async def start_command(message: types.Message, state: FSMContext):
     
     add_user(user_id, username, full_name)
     
-    # Удаляем предыдущие сообщения с клавиатурами если они были
     try:
         await message.delete()
     except:
@@ -362,7 +369,6 @@ async def start_command(message: types.Message, state: FSMContext):
         reply_markup=get_main_keyboard(user_id)
     )
 
-# Обработчик для отлова всех состояний и возврата в меню
 @dp.message_handler(state='*', commands=["start"])
 async def start_state_handler(message: types.Message, state: FSMContext):
     await state.finish()
@@ -469,7 +475,6 @@ async def admin_process_rub(message: types.Message, state: FSMContext):
         user_id = cursor.fetchone()[0]
         conn.close()
         
-        # Отправляем уведомление пользователю
         await bot.send_message(
             user_id,
             f"💰 Новый профит!\n\n"
@@ -544,99 +549,89 @@ async def process_unsubscribed_selection(message: types.Message, state: FSMConte
         await message.answer("❌ Введите номера через запятую (например: 1,2,3,4,5):")
 
 @dp.message_handler(lambda message: message.text == "👥 Мои клиенты")
-async def clients_menu(message: types.Message):
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    keyboard.add(
-        InlineKeyboardButton(text="✅ Активные", callback_data="view_active"),
-        InlineKeyboardButton(text="❌ Отписавшиеся", callback_data="view_unsubscribed"),
-        InlineKeyboardButton(text="👥 Все клиенты", callback_data="view_all")
-    )
-    await message.answer("📋 Выберите список клиентов:", reply_markup=keyboard)
-
-@dp.callback_query_handler(lambda c: c.data.startswith("view_active"))
-async def view_active_clients(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    tags = get_user_active_tags(user_id)
+async def view_all_clients(message: types.Message):
+    user_id = message.from_user.id
+    tags = get_all_user_tags_with_status(user_id)
     
     if not tags:
-        await bot.send_message(callback_query.from_user.id, "✅ У вас нет активных клиентов.")
-        await callback_query.answer()
+        await message.answer("У вас нет клиентов.")
         return
     
-    await callback_query.answer()
-    await send_paginated_list(callback_query.from_user.id, tags, "active", "✅ Активные клиенты")
-
-@dp.callback_query_handler(lambda c: c.data.startswith("view_unsubscribed"))
-async def view_unsubscribed_clients(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    tags = get_user_unsubscribed_tags(user_id)
+    # Сохраняем список в состоянии для пагинации
+    await dp.storage.set_data(user_id, {'clients_list': tags})
     
-    if not tags:
-        await bot.send_message(callback_query.from_user.id, "❌ У вас нет отписавшихся клиентов.")
-        await callback_query.answer()
-        return
+    # Получаем текущее время по Москве
+    moscow_time = datetime.now(TIMEZONE).strftime("%H:%M")
     
-    await callback_query.answer()
-    await send_paginated_list(callback_query.from_user.id, tags, "unsubscribed", "❌ Отписавшиеся клиенты")
-
-@dp.callback_query_handler(lambda c: c.data.startswith("view_all"))
-async def view_all_clients(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    tags = get_all_user_tags(user_id)
-    
-    if not tags:
-        await bot.send_message(callback_query.from_user.id, "У вас нет клиентов.")
-        await callback_query.answer()
-        return
-    
-    await callback_query.answer()
-    await send_paginated_list(callback_query.from_user.id, tags, "all", "👥 Все клиенты")
-
-async def send_paginated_list(user_id, tags, list_type, title):
+    # Формируем начальную страницу
     page = 1
-    await send_list_page(user_id, tags, list_type, title, page)
+    await send_clients_page(message, user_id, tags, page, moscow_time)
 
-async def send_list_page(user_id, tags, list_type, title, page):
+async def send_clients_page(message_or_callback, user_id, tags, page, update_time):
     items, page, total_pages = paginate_items(tags, page)
     
-    text = f"{title} (стр. {page}/{total_pages}):\n\n"
+    text = f"📋 Список клиентов\n"
+    text += f"🕐 Последнее обновление: {update_time} UTC+3\n\n"
+    
     for item in items:
-        if list_type == "active":
-            text += f"🔹 {item[1]} | 📅 {item[3]}\n"
-        elif list_type == "unsubscribed":
-            text += f"🔹 {item[1]} | 📅 {item[3]} | 📆 {item[-1][:10]}\n"
-        else:  # all
-            is_unsubscribed = item[-1]
-            status = "❌" if is_unsubscribed else "✅"
-            text += f"{status} {item[1]} | 📅 {item[3]}\n"
+        tag_name = item[1]
+        deadline = item[2]
+        is_unsubscribed = item[4]
+        has_payment = item[5]
+        
+        # Определяем статус
+        if has_payment:
+            status = "💰"
+        elif is_unsubscribed:
+            status = "✅"
+        else:
+            status = "❌"
+        
+        text += f"{status} {tag_name} | 📅 {deadline}\n"
     
-    keyboard = get_pagination_keyboard(page, total_pages, list_type)
-    await bot.send_message(user_id, text, reply_markup=keyboard)
+    text += f"\nСтраница {page}/{total_pages}"
+    
+    keyboard = get_pagination_keyboard(page, total_pages)
+    
+    if isinstance(message_or_callback, types.Message):
+        await message_or_callback.answer(text, reply_markup=keyboard)
+    else:
+        await message_or_callback.message.edit_text(text, reply_markup=keyboard)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("active_page_") or 
-                                   c.data.startswith("unsubscribed_page_") or 
-                                   c.data.startswith("all_page_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("page_"))
 async def pagination_callback(callback_query: types.CallbackQuery):
-    data = callback_query.data
-    parts = data.split('_')
-    list_type = parts[0]
-    page = int(parts[2])
-    
+    page = int(callback_query.data.split('_')[1])
     user_id = callback_query.from_user.id
     
-    if list_type == "active":
-        tags = get_user_active_tags(user_id)
-        title = "✅ Активные клиенты"
-    elif list_type == "unsubscribed":
-        tags = get_user_unsubscribed_tags(user_id)
-        title = "❌ Отписавшиеся клиенты"
-    else:
-        tags = get_all_user_tags(user_id)
-        title = "👥 Все клиенты"
+    # Получаем сохраненный список
+    data = await dp.storage.get_data(user_id)
+    tags = data.get('clients_list', [])
     
-    await callback_query.message.delete()
-    await send_list_page(user_id, tags, list_type, title, page)
+    if not tags:
+        await callback_query.message.edit_text("❌ Список клиентов не найден. Нажмите 'Мои клиенты' заново.")
+        await callback_query.answer()
+        return
+    
+    moscow_time = datetime.now(TIMEZONE).strftime("%H:%M")
+    await send_clients_page(callback_query, user_id, tags, page, moscow_time)
     await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "refresh")
+async def refresh_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    tags = get_all_user_tags_with_status(user_id)
+    
+    if not tags:
+        await callback_query.message.edit_text("У вас нет клиентов.")
+        await callback_query.answer()
+        return
+    
+    await dp.storage.set_data(user_id, {'clients_list': tags})
+    
+    moscow_time = datetime.now(TIMEZONE).strftime("%H:%M")
+    page = 1
+    await send_clients_page(callback_query, user_id, tags, page, moscow_time)
+    await callback_query.answer("🔄 Список обновлен!")
 
 @dp.callback_query_handler(lambda c: c.data == "close")
 async def close_callback(callback_query: types.CallbackQuery):
@@ -649,11 +644,11 @@ async def personal_stats(message: types.Message):
     stats = get_user_stats(user_id)
     
     text = f"📊 Ваша личная статистика:\n\n"
-    text += f"💰 Общая сумма выплат: {stats['total_payments']:.2f}₽\n"
-    text += f"💵 Сумма профитов: {stats['total_profit']:.2f}₽\n"
+    text += f"💰 Общая сумма выплат: ${stats['total_payments_usd']:.2f}\n"
+    text += f"💵 Сумма профитов: ${stats['total_profit_usd']:.2f}\n"
     text += f"👥 Количество клиентов: {stats['clients_count']}\n"
     text += f"📉 Количество отписавшихся: {stats['unsubscribed_count']}\n"
-    text += f"💲 Компенсация за отписавшихся: {stats['refund_amount']:.2f}$"
+    text += f"💲 Компенсация за отписавшихся: ${stats['refund_amount']:.2f}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
@@ -670,14 +665,13 @@ async def team_stats(message: types.Message):
     
     text = f"📊 Статистика команды:\n\n"
     text += f"👥 Активных работников: {stats['active_workers']}\n"
-    text += f"💰 Общая сумма оплат: {stats['total_payments']:.2f}₽\n"
-    text += f"💵 Общая сумма профитов: {stats['total_profit']:.2f}₽\n"
+    text += f"💰 Общая сумма оплат: ${stats['total_payments_usd']:.2f}\n"
+    text += f"💵 Общая сумма профитов: ${stats['total_profit_usd']:.2f}\n"
     text += f"👤 Всего клиентов: {stats['total_clients']}\n"
     text += f"📉 Всего отписавшихся: {stats['total_unsubscribed']}"
     
     await message.answer(text, reply_markup=get_main_keyboard(user_id))
 
-# Обработчик для отлова всех остальных состояний и возврата в меню
 @dp.message_handler(state='*')
 async def handle_all_states(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
