@@ -77,7 +77,7 @@ def init_db():
     
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS unsubscribed (
-        id INTEGER PRIMARY KEY AUTOINLINE,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         tag_id INTEGER,
         unsubscribed_date TEXT,
         FOREIGN KEY (tag_id) REFERENCES tags (id)
